@@ -1,4 +1,37 @@
-# CLAUDE.md — Operating Manual for Claude Code
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+# Install (editable, from repo root)
+pip install -e .
+
+# Run all tests
+pytest
+
+# Run a single test file
+pytest tests/phase0/test_filter.py
+
+# Run a single test by name
+pytest tests/phase0/test_filter.py::test_is_qualified_btc_market -v
+
+# Lint + format check
+ruff check src/pmbot tests
+ruff format --check src/pmbot tests
+
+# Auto-fix lint
+ruff check --fix src/pmbot tests
+
+# Type check (strict, scoped to one phase)
+mypy --strict src/pmbot/phase0
+
+# Type check entire package
+mypy --strict src/pmbot
+```
+
+---
 
 ## Purpose
 This file tells Claude Code how to work in this repo. The authoritative design

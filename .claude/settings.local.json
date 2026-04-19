@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(pip search *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python -m pytest tests/phase1/test_whitelist.py -v)",
+      "Bash(python -m mypy --strict src/pmbot/phase1_data/)",
+      "Bash(python -m ruff check src/pmbot/phase1_data/ tests/phase1/ scripts/build_whitelist.py)",
+      "Bash(python -m ruff format --check src/pmbot/phase1_data/ tests/phase1/ scripts/build_whitelist.py)",
+      "Bash(python -m ruff format src/pmbot/phase1_data/ tests/phase1/ scripts/build_whitelist.py)",
+      "Bash(python -m pytest tests/phase1/test_whitelist.py -v --tb=short)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
