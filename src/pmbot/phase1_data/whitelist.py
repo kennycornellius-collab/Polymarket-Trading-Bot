@@ -33,8 +33,8 @@ class GammaMarketRecord(TypedDict):
     slug: str
     outcomes: str  # JSON-encoded string: '["Yes","No"]' — must json.loads()
     endDate: str  # ISO 8601 e.g. "2025-03-01T00:00:00Z"
-    volume24hr: str  # API returns as string; coerced to float in adapter
-    tags: NotRequired[list[dict[str, str]]]  # [{id, label, slug}, ...]
+    volume24hr: NotRequired[float]  # absent on some records; treat missing as 0.0
+    tags: NotRequired[list[dict[str, str]] | None]  # null on some records
     active: NotRequired[bool]
     closed: NotRequired[bool]
 
@@ -132,7 +132,7 @@ def gamma_record_to_market_metadata(record: GammaMarketRecord, now: datetime) ->
         underlying=infer_underlying(record),
         strike_type=infer_strike_type(record),
         tte_days=compute_tte_days(record, now),
-        daily_volume_usdc=float(record["volume24hr"]),
+        daily_volume_usdc=record.get("volume24hr") or 0.0,
     )
 
 

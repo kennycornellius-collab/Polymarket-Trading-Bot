@@ -42,7 +42,7 @@ def _record(**overrides: Any) -> GammaMarketRecord:
         "slug": "btc-100k-march",
         "outcomes": '["Yes","No"]',
         "endDate": _future(15),
-        "volume24hr": "50000.0",
+        "volume24hr": 50000.0,
         "tags": [{"id": "1", "label": "BTC", "slug": "btc"}],
     }
     base.update(overrides)
@@ -192,7 +192,7 @@ def test_adapter_full_record() -> None:
         slug="btc-100k-march",
         outcomes='["Yes","No"]',
         endDate="2026-05-04T12:00:00Z",  # 15 days from now
-        volume24hr="75000.5",
+        volume24hr=75000.5,
         tags=[{"id": "1", "label": "BTC", "slug": "btc"}],
     )
     meta = gamma_record_to_market_metadata(record, now)
@@ -204,10 +204,32 @@ def test_adapter_full_record() -> None:
     assert meta.daily_volume_usdc == 75000.5
 
 
-def test_adapter_malformed_volume() -> None:
+def test_adapter_explicit_zero_volume() -> None:
     now = _now_utc()
-    with pytest.raises(ValueError):
-        gamma_record_to_market_metadata(_record(volume24hr="n/a"), now)
+    meta = gamma_record_to_market_metadata(_record(volume24hr=0.0), now)
+    assert meta.daily_volume_usdc == 0.0
+
+
+def test_adapter_missing_volume_and_null_tags() -> None:
+    """Missing volume24hr → 0.0; tags=None → no crash. Filter rejects via volume_below_threshold."""
+    from pmbot.phase0_filter import FilterConfig, is_qualified_btc_market
+
+    now = _now_utc()
+    record: GammaMarketRecord = {  # type: ignore[typeddict-item]
+        "id": "no-vol",
+        "question": "Will BTC hit $100k by May?",
+        "slug": "btc-100k-may",
+        "outcomes": '["Yes","No"]',
+        "endDate": _future(15),
+        "tags": None,
+    }
+    meta = gamma_record_to_market_metadata(record, now)
+    assert meta.daily_volume_usdc == 0.0
+
+    result = is_qualified_btc_market(meta, FilterConfig())
+    assert not result.qualified
+    assert "volume_below_threshold" in result.reasons
+    assert "malformed_record" not in result.reasons
 
 
 # ── build_whitelist (mocked HTTP) ─────────────────────────────────────────────
@@ -217,19 +239,19 @@ def _make_fixture_records() -> list[dict[str, Any]]:
     """8 records: 3 qualifying, 4 rejected (one per reason), 1 malformed."""
     return [
         # qualifying
-        _record(id="q1", question="Will BTC hit $100k by May?", volume24hr="50000"),
-        _record(id="q2", question="Will BTC exceed $110k by June?", volume24hr="20000"),
-        _record(id="q3", question="Will BTC reach $90k by April?", volume24hr="15000"),
+        _record(id="q1", question="Will BTC hit $100k by May?", volume24hr=50000.0),
+        _record(id="q2", question="Will BTC exceed $110k by June?", volume24hr=20000.0),
+        _record(id="q3", question="Will BTC reach $90k by April?", volume24hr=15000.0),
         # wrong market type (up/down)
         _record(
-            id="r1", question="BTC up or down $100k?", outcomes='["Up","Down"]', volume24hr="30000"
+            id="r1", question="BTC up or down $100k?", outcomes='["Up","Down"]', volume24hr=30000.0
         ),
         # wrong underlying
-        _record(id="r2", question="Will ETH hit $5k?", slug="eth-5k", tags=[], volume24hr="30000"),
+        _record(id="r2", question="Will ETH hit $5k?", slug="eth-5k", tags=[], volume24hr=30000.0),
         # wrong strike type (percentage move — but no dollar sign)
-        _record(id="r3", question="Will BTC rise 10%?", volume24hr="30000"),
+        _record(id="r3", question="Will BTC rise 10%?", volume24hr=30000.0),
         # tte out of range (45 days)
-        _record(id="r4", question="Will BTC hit $100k?", endDate=_future(45), volume24hr="30000"),
+        _record(id="r4", question="Will BTC hit $100k?", endDate=_future(45), volume24hr=30000.0),
         # malformed (missing required field)
         {"id": "m1"},  # no question/outcomes/endDate/volume24hr
     ]

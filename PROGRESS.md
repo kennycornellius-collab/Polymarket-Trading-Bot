@@ -70,6 +70,42 @@ Python dependencies added.
   Added `user_agent` field to `WhitelistConfig` and a test asserting the header
   is present on every request.
 
+### 2026-04-19 schema corrections (three bugs fixed via smoke test)
+
+**Bug 1 — volume24hr is optional and numeric (not a string).** Some live records
+lack `volume24hr` entirely; others that have it return a JSON number, not a string.
+Fixed: marked as `NotRequired[float]`; adapter uses `record.get("volume24hr") or 0.0`
+so missing volume → 0.0 → filter rejects as `volume_below_threshold` (correct) instead
+of crashing as `malformed_record` (wrong).
+
+**Bug 2 — tags can be null.** Live API returns `null` for `tags` on some records,
+not just absent/list. Fixed: updated TypedDict to `NotRequired[list[dict[str, str]] | None]`;
+`infer_underlying` already used `record.get("tags") or []` which handles None correctly.
+
+**Bug 3 — integration test was a dead canary.** Rewrote to: (a) assert `volume24hr` is
+numeric when present, (b) assert `tags` is None-or-list when present, (c) run the adapter
+on all 50 records and assert ≥5 succeed, giving it a chance to catch type errors.
+
+**Confirmed field names from live data** (48,600 markets, 198s run):
+- Required: `id` (str), `question` (str), `slug` (str), `outcomes` (JSON str), `endDate` (str, but absent on ~350 records → currently `malformed_record`)
+- Optional numeric: `volume24hr` (float), `volume`, `volume1wk`, `volume1mo`, `volumeNum`, `liquidity`, `bestBid`, `bestAsk`
+- Optional other: `tags` (list | null), `clobTokenIds`, `active`, `closed`
+
+**Additional fields available for future phases** (noted, not used here):
+`volume`, `volume1wk`, `volume1mo`, `volumeNum` — useful for Pass 2 / Phase 2 training data;
+`liquidity`, `bestBid`, `bestAsk` — useful for executor spread checks in Phase 3;
+`clobTokenIds` — needed for CLOB order placement in Phase 6.
+
+**Live smoke test result:** 15 qualified / 48,600 seen. CSV written to
+`data/whitelist/qualified_markets_whitelist.csv`. Rejection leaders: `wrong_underlying`
+(47,462), `volume_below_threshold` (47,120), `wrong_strike_type` (45,424),
+`tte_out_of_range` (24,641), `wrong_market_type` (18,018).
+
+**Deferred from this commit:** `endDate` is absent on ~350 records (currently
+`malformed_record`). Likely these are perpetual or group markets without a fixed
+resolution date. Should be marked `NotRequired` with a `None`/absent-safe TTE
+computation in a follow-up fix.
+
 **Deferred:**
 - Loading WhitelistConfig from configs/whitelist.toml (Phase 1+).
 - Resolved-market whitelist construction for historical training data (Phase 1.5).
