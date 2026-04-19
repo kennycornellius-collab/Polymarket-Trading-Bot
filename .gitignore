@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Secrets & local config
+.env
+.env.local
+*.pem
+*.key
+
+# Data (never commit — too big, changes constantly)
+data/
+*.parquet
+*.duckdb
+*.db
+
+# Model artifacts
+models/
+*.pkl
+*.joblib
+*.xgb
+*.model
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter (if you experiment; prefer not to commit notebooks)
+.ipynb_checkpoints/
+*.ipynb
