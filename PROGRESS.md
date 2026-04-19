@@ -64,6 +64,11 @@ Python dependencies added.
   convention, unit tests will still pass but the production script will write
   garbage. Run `pytest -m integration` manually before each weekly whitelist
   rebuild until a startup health check is added in a later phase.
+- FIX: Cloudflare on gamma-api.polymarket.com returned HTTP 403 for the default
+  Python-urllib/3.12 user agent. Fixed by sending an honest `User-Agent` header
+  (`pmbot/0.1 (+https://github.com/<placeholder>)`) via `urllib.request.Request`.
+  Added `user_agent` field to `WhitelistConfig` and a test asserting the header
+  is present on every request.
 
 **Deferred:**
 - Loading WhitelistConfig from configs/whitelist.toml (Phase 1+).

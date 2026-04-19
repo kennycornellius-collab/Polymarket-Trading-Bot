@@ -52,6 +52,7 @@ class WhitelistConfig:
     inter_request_delay_s: float = 0.15  # sleep between pagination requests
     max_retries: int = 3  # retries for 5xx / transient network errors
     retry_base_delay_s: float = 0.5  # first retry delay; doubles each attempt
+    user_agent: str = "pmbot/0.1 (+https://github.com/<placeholder>)"
 
 
 @dataclass(frozen=True)
@@ -153,10 +154,11 @@ def _fetch_markets_page(config: WhitelistConfig, offset: int) -> list[GammaMarke
         }
     )
     url = f"{config.gamma_base_url}/markets?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": config.user_agent})
 
     for attempt in range(config.max_retries + 1):
         try:
-            with urllib.request.urlopen(url, timeout=config.request_timeout_s) as resp:
+            with urllib.request.urlopen(req, timeout=config.request_timeout_s) as resp:
                 return cast(list[GammaMarketRecord], json.loads(resp.read()))
         except urllib.error.HTTPError as exc:
             if 400 <= exc.code < 500:

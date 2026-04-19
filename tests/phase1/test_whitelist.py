@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -326,6 +327,23 @@ def test_build_whitelist_malformed_record_continues(tmp_path: Path) -> None:
     assert result.qualified_count == 1
     assert result.rejection_reasons.get("malformed_record", 0) == 1
     assert result.total_markets_seen == 2
+
+
+def test_fetch_markets_page_sends_user_agent(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    captured: list[urllib.request.Request] = []
+
+    def fake_urlopen(req: urllib.request.Request, **_: object) -> MagicMock:
+        captured.append(req)
+        return _make_urlopen_cm([])
+
+    with patch("pmbot.phase1_data.whitelist.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("pmbot.phase1_data.whitelist.time.sleep"):
+            build_whitelist(cfg, FilterConfig())
+
+    assert len(captured) >= 1
+    sent_ua = captured[0].get_header("User-agent")
+    assert sent_ua == cfg.user_agent
 
 
 def test_build_whitelist_4xx_error(tmp_path: Path) -> None:
