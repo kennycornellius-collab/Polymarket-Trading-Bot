@@ -1,0 +1,11 @@
+# WhitelistConfig defaults — Phase 1.1 Pass 1
+# This file documents tunables. Loading from TOML is Phase 1+ scope.
+
+output_csv_path = "data/whitelist/qualified_markets_whitelist.csv"
+gamma_base_url = "https://gamma-api.polymarket.com"
+fetch_limit = 100
+request_timeout_s = 30.0
+log_every_n_rejections = 100
+inter_request_delay_s = 0.15
+max_retries = 3
+retry_base_delay_s = 0.5

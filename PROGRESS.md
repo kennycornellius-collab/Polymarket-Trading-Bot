@@ -31,3 +31,41 @@ Codes are collected in the order above (no short-circuit); returned as a
 
 **Deferred:** None. Phase 0 is self-contained. No stubs or scaffolding for later
 phases were introduced.
+
+## 2026-04-19 — Phase 1.1 Pass 1: Whitelist Builder
+
+**SPEC step covered:** Phase 1, Step 1.1, Pass 1 — Whitelist Builder. Queries
+Polymarket metadata and runs each market through the Phase 0 filter to produce
+qualified_markets_whitelist.csv.
+
+**Library change:** pmxt was not used. pmxt requires a Node.js ≥18 sidecar process
+not available in this environment. The Polymarket Gamma Markets REST API
+(https://gamma-api.polymarket.com) was called directly via urllib (stdlib). No new
+Python dependencies added.
+
+**Inference heuristics:**
+- market_type: "binary" iff outcomes JSON decodes to exactly ["yes","no"]
+  (case-insensitive). Up/Down markets → "non_binary".
+- underlying: "BTC" if "btc" or "bitcoin" (case-insensitive) appears in question,
+  slug, or any tag label; else "other".
+- strike_type: "absolute" if title matches `\$\s*[\d,]+(?:\.\d+)?\s*[kKmM]?`;
+  "percentage" if title matches `\b\d+(?:\.\d+)?\s*%` or directional verb + number;
+  "unknown" otherwise. Unknown → rejected by Phase 0 filter.
+- tte_days: (endDate - run_started_at).total_seconds() / 86400. Float, not int.
+
+**Known-brittle points:**
+- Gamma API field names (endDate, volume24hr, outcomes-as-JSON-string) assumed
+  from documentation; verified by integration test.
+- Regex patterns miss dollar-less absolute strikes ("100000 USD") and verbal
+  percentage descriptions — both intentionally return "unknown" → excluded.
+- volume24hr coerced from string; malformed values → "malformed_record".
+- CRITICAL: Gamma API field names are verified ONLY by the opt-in integration
+  test. If Polymarket renames volume24hr, endDate, or the outcomes-JSON-string
+  convention, unit tests will still pass but the production script will write
+  garbage. Run `pytest -m integration` manually before each weekly whitelist
+  rebuild until a startup health check is added in a later phase.
+
+**Deferred:**
+- Loading WhitelistConfig from configs/whitelist.toml (Phase 1+).
+- Resolved-market whitelist construction for historical training data (Phase 1.5).
+- Volume/TTE proxies for historical/closed markets — out of scope for Pass 1.

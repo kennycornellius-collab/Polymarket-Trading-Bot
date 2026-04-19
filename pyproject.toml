@@ -13,6 +13,9 @@
    [tool.pytest.ini_options]
    pythonpath = ["src"]
    testpaths = ["tests"]
+   markers = [
+       "integration: live API tests; skipped by default (run with -m integration)",
+   ]
 
    [tool.mypy]
    strict = true
