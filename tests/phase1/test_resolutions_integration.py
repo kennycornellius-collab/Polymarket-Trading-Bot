@@ -141,3 +141,88 @@ def _count_outcomes(records: list) -> dict[str, int]:  # type: ignore[type-arg]
     for r in records:
         counts[r.outcome] = counts.get(r.outcome, 0) + 1
     return counts
+
+
+# UMA status values observed in 2026-04-25 sweep across 2,500 records:
+#   'proposed'  — routine: proposer submitted (~68% of non-empty)
+#   'resolved'  — routine: finalized cleanly (~27%)
+#   'disputed'  — actual dispute (~0.6%)
+_KNOWN_UMA_STATUS_VALUES: frozenset[str] = frozenset({"proposed", "resolved", "disputed"})
+
+
+@pytest.mark.integration
+def test_uma_status_predicate_semantics() -> None:
+    """Guard against the 2026-04-25 bug: routine 'proposed'/'resolved' must not fire disputed.
+
+    Sweeps 3 offset bands (0, 50k, 100k) across Gamma's ~250k corpus for ≥500 records.
+    Asserts:
+      - No UMA status values outside the known set (catches new lifecycle states).
+      - disputed-flag rate < 5% (catches wholesale mis-classification).
+      - Records with 'proposed' (only) do NOT carry the disputed flag (direct regression).
+    """
+    cfg = ResolutionConfig(page_size=100)
+    band_offsets = [0, 50_000, 100_000]
+    pages_per_band = 2  # 200 records per band → 600 total
+
+    raw_all: list = []
+    for band_offset in band_offsets:
+        for page_idx in range(pages_per_band):
+            page = _fetch_closed_markets_page(cfg, offset=band_offset + page_idx * cfg.page_size)
+            if not page:
+                break
+            raw_all.extend(page)
+
+    assert len(raw_all) >= 500, (
+        f"Expected ≥500 records across offset bands, got {len(raw_all)}. "
+        "Gamma corpus may be smaller or API returned short pages early."
+    )
+
+    # ── Distinct UMA status values must be subset of known set ───────────────
+    seen_statuses: set[str] = set()
+    for rec in raw_all:
+        uma_raw = rec.get("umaResolutionStatuses")
+        if uma_raw:
+            try:
+                parsed = json.loads(uma_raw)
+                if isinstance(parsed, list):
+                    seen_statuses.update(str(v) for v in parsed)
+            except Exception:
+                pass
+
+    unexpected = seen_statuses - _KNOWN_UMA_STATUS_VALUES
+    assert not unexpected, (
+        f"Polymarket added UMA status values not in known set {set(_KNOWN_UMA_STATUS_VALUES)!r}: "
+        f"{unexpected!r}. Review dispute_status_values in ResolutionConfig."
+    )
+
+    # ── disputed-flag rate must be < 5% ──────────────────────────────────────
+    built = [build_resolution_record(r, cfg) for r in raw_all]
+    disputed_count = sum(1 for r in built if "disputed" in r.flags)
+    disputed_rate = disputed_count / len(built) if built else 0.0
+    assert disputed_rate < 0.05, (
+        f"Expected <5% disputed-flag rate, got {disputed_rate:.1%} "
+        f"({disputed_count}/{len(built)}). "
+        "Predicate may be treating routine lifecycle states as disputes."
+    )
+
+    # ── 'proposed'-only records must NOT carry the disputed flag ─────────────
+    proposed_only_built = []
+    for raw, built_rec in zip(raw_all, built):
+        uma_raw = raw.get("umaResolutionStatuses") or "[]"
+        try:
+            parsed_list: list[str] = json.loads(uma_raw)
+        except Exception:
+            parsed_list = []
+        if "proposed" in parsed_list and "disputed" not in parsed_list:
+            proposed_only_built.append(built_rec)
+
+    assert len(proposed_only_built) >= 1, (
+        "No records with 'proposed' (non-disputed) UMA status found in sample — "
+        "cannot exercise the negative case. Widen the scan."
+    )
+    wrongly_flagged = [r for r in proposed_only_built if "disputed" in r.flags]
+    assert not wrongly_flagged, (
+        f"Found {len(wrongly_flagged)} record(s) with 'proposed'-only UMA status "
+        f"wrongly flagged as disputed:\n"
+        + "\n".join(f"  id={r.market_id} flags={r.flags!r}" for r in wrongly_flagged)
+    )

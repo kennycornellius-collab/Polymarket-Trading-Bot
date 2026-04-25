@@ -65,6 +65,13 @@ class ResolutionConfig:
     # Resolution quality thresholds
     early_resolution_tolerance_hours: float = 24.0
     walkover_volume_threshold_usdc: float = 1000.0  # justified: p10=715 in 50-market sample
+    # UMA lifecycle states that indicate a genuine dispute.
+    # Observed values across 2,500-market sweep (2026-04-25):
+    #   'proposed'  — routine: proposer submitted outcome (~68% of non-empty)
+    #   'resolved'  — routine: finalized cleanly (~27%)
+    #   'disputed'  — actual dispute (~0.6%)
+    # Only 'disputed' should set the flag; the others are normal lifecycle noise.
+    dispute_status_values: frozenset[str] = frozenset({"disputed"})
     output_csv_path: Path = Path("data/resolutions/resolved_markets.csv")
 
 
@@ -240,13 +247,17 @@ def build_resolution_record(
         config.outcome_price_sum_tolerance,
     )
 
-    # Disputed: umaResolutionStatuses parses to a non-empty list
+    # Disputed: umaResolutionStatuses contains a value in dispute_status_values.
+    # The field is a JSON-encoded flat list of strings, e.g. '["proposed"]' or
+    # '["proposed","disputed"]'. Routine lifecycle values ('proposed', 'resolved')
+    # must NOT set the flag — only values in config.dispute_status_values do.
     uma_raw = record.get("umaResolutionStatuses") or "[]"
     try:
-        if json.loads(uma_raw):
+        uma_parsed: list[str] = json.loads(uma_raw)
+        if set(uma_parsed) & config.dispute_status_values:
             flags.append("disputed")
     except (json.JSONDecodeError, ValueError, TypeError):
-        pass
+        logger.warning("market id=%s: umaResolutionStatuses not parseable: %r", market_id, uma_raw)
 
     # Resolved early: closedTime ≤ endDate − tolerance (inclusive at exactly tolerance)
     if resolved_dt is not None and end_dt is not None:

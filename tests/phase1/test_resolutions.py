@@ -288,14 +288,39 @@ def test_record_walkover() -> None:
 
 
 def test_record_disputed() -> None:
+    """Flat string list containing 'disputed' fires the flag."""
     r = _record(
         outcomePrices='["0","1"]',
         volumeNum=24190.0,
-        umaResolutionStatuses='[{"status":"disputed","timestamp":"2023-06-18T00:00:00Z"}]',
+        umaResolutionStatuses='["disputed"]',
     )
     rec = build_resolution_record(r, _CFG)
     assert rec.outcome == "NO"
     assert rec.flags == "disputed"
+
+
+def test_record_uma_proposed_not_disputed() -> None:
+    """'proposed' is a routine UMA lifecycle state and must NOT fire the disputed flag."""
+    r = _record(umaResolutionStatuses='["proposed"]', volumeNum=24190.0)
+    rec = build_resolution_record(r, _CFG)
+    assert "disputed" not in rec.flags
+
+
+def test_record_uma_resolved_not_disputed() -> None:
+    """'resolved' is a routine UMA finalization state and must NOT fire the disputed flag."""
+    r = _record(umaResolutionStatuses='["resolved"]', volumeNum=24190.0)
+    rec = build_resolution_record(r, _CFG)
+    assert "disputed" not in rec.flags
+
+
+def test_record_uma_proposed_then_disputed() -> None:
+    """A list containing both 'proposed' and 'disputed' fires the flag (membership, not exclusivity)."""
+    r = _record(
+        umaResolutionStatuses='["proposed","disputed"]',
+        volumeNum=24190.0,
+    )
+    rec = build_resolution_record(r, _CFG)
+    assert "disputed" in rec.flags
 
 
 def test_record_multi_flag_alphabetical() -> None:

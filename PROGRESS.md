@@ -196,3 +196,39 @@ entire run.
 
 **Gamma corpus size:** The 422 at offset ~250,100 implies approximately 250,000 total
 closed markets in the Gamma API corpus at the time of the smoke run (2026-04-25).
+
+### 2026-04-25 — Phase 1.5 post-commit fix: disputed predicate over-firing
+
+**Bug:** The `disputed` flag fired on ~96% of records (6,592 of 6,876) instead of the
+expected ~1%. Root cause: the original 50-market planning sample showed
+`umaResolutionStatuses` always `'[]'`, but a 2,500-market sweep across five offset bands
+found the field is populated with UMA lifecycle states, not exclusively disputes:
+
+  | Status | Count | Meaning |
+  |---|---|---|
+  | `'proposed'` | 1,705 | Routine: proposer submitted outcome |
+  | `''` (empty list) | 810 | No UMA action |
+  | `'resolved'` | 667 | Routine: finalized cleanly |
+  | `'disputed'` | 16 | Actual dispute (~0.6%) |
+
+The original predicate `bool(json.loads(uma_raw))` treated any non-empty list as a dispute.
+
+**Fix:** Changed to membership check against `config.dispute_status_values`
+(`frozenset({"disputed"})` by default, extensible). New predicate:
+```python
+set(json.loads(uma_raw)) & config.dispute_status_values
+```
+Malformed JSON now logs WARNING and defaults to `disputed=False` (previously silently
+skipped).
+
+**Dead-canary lesson (second occurrence in Phase 1 work):** The integration test only
+asserted field presence (is `umaResolutionStatuses` parseable JSON?), not predicate
+semantics (does a `'proposed'`-only record avoid the `disputed` flag?). Added a new
+integration test (`test_uma_status_predicate_semantics`) that:
+- Sweeps 600 records across 3 offset bands (0, 50k, 100k).
+- Asserts no UMA status values outside `{'proposed', 'resolved', 'disputed'}`.
+- Asserts `disputed`-flag rate < 5%.
+- Asserts at least one `'proposed'`-only record does NOT carry the flag (negative case).
+
+**Rule:** Integration tests must exercise predicate semantics with known-positive AND
+known-negative cases — field-shape assertions alone cannot catch logic bugs.
