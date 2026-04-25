@@ -232,3 +232,22 @@ integration test (`test_uma_status_predicate_semantics`) that:
 
 **Rule:** Integration tests must exercise predicate semantics with known-positive AND
 known-negative cases — field-shape assertions alone cannot catch logic bugs.
+
+### 2026-04-25 — Phase 1.5 post-commit fix: mid-response TimeoutError not retried
+
+**Bug:** `resp.read()` inside the `with urlopen(...) as resp:` block can raise
+`TimeoutError` directly (an `OSError` subclass) when the SSL/socket layer times out
+mid-response. The retry handler caught `urllib.error.URLError` (connection-phase errors)
+but not `TimeoutError` (read-phase error), so a single transient timeout crashed the
+entire ~6-minute smoke run.
+
+**Fix:** Changed `except urllib.error.URLError` to `except OSError` in
+`_fetch_closed_markets_page`. Since `urllib.error.URLError` inherits from `OSError`,
+this change is a strict superset — all previously caught errors are still caught, and
+`TimeoutError` from `resp.read()` is now retried with the same exponential backoff.
+`urllib.error.HTTPError` is caught first (more specific), so HTTP-level errors are
+unaffected.
+
+**Checkpoint outcome from first smoke run:** The partial checkpoint at 7,166 records
+confirmed the predicate fix: 15 disputed (0.2%) vs 96% before. Training-eligible count
+projected to ~4,600 in the partial, consistent with the 3,000–4,500 target.

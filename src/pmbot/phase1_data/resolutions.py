@@ -333,7 +333,9 @@ def _fetch_closed_markets_page(
                 delay,
             )
             time.sleep(delay)
-        except urllib.error.URLError as exc:
+        except OSError as exc:
+            # Covers urllib.error.URLError (connection errors) and TimeoutError
+            # (raised directly from resp.read() on mid-response SSL timeouts).
             if attempt >= config.max_retries:
                 logger.error("Network error — exhausted %d retries", config.max_retries)
                 raise
