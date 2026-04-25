@@ -248,6 +248,9 @@ this change is a strict superset — all previously caught errors are still caug
 `urllib.error.HTTPError` is caught first (more specific), so HTTP-level errors are
 unaffected.
 
-**Checkpoint outcome from first smoke run:** The partial checkpoint at 7,166 records
-confirmed the predicate fix: 15 disputed (0.2%) vs 96% before. Training-eligible count
-projected to ~4,600 in the partial, consistent with the 3,000–4,500 target.
+**Smoke run final results (2026-04-25, post-fix):**
+- Total BTC binary shape records: **7,658**
+- Outcomes: YES=2,327 (30%), NO=5,329 (70%), INVALID=2
+- Flags: walkover=2,335 (30%), resolved_early=206 (3%), disputed=17 (0.2%), invalid_resolution=2
+- **Training-eligible: 5,106** (66% of corpus)
+- disputed rate 0.2% confirms predicate fix (was 96% pre-fix)
