@@ -538,3 +538,84 @@ def test_build_whitelist_5xx_recovers_on_retry(tmp_path: Path) -> None:
     assert mock_url.call_count == 2
     assert mock_sleep.call_count == 1
     assert mock_sleep.call_args == call(0.0)  # retry_base_delay_s=0.0 * 2^0
+
+
+# ── 422 pagination cap ────────────────────────────────────────────────────────
+
+
+def test_fetch_page_422_returns_empty_and_logs_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """HTTP 422 from Gamma signals the hard pagination cap; must return [] and log INFO."""
+    import logging
+
+    from pmbot.phase1_data.resolutions import _fetch_closed_markets_page
+
+    cfg = _cfg(tmp_path)
+    with patch("pmbot.phase1_data.resolutions.urllib.request.urlopen") as mock_url:
+        mock_url.side_effect = _http_error(422)
+        with caplog.at_level(logging.INFO, logger="pmbot.phase1_data.resolutions"):
+            result = _fetch_closed_markets_page(cfg, offset=250100)
+
+    assert result == []
+    assert mock_url.call_count == 1  # no retries on 422
+    assert any("pagination cap" in msg for msg in caplog.messages)
+
+
+def test_build_whitelist_422_terminates_cleanly_and_returns_prior_records(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """422 mid-pagination returns all records accumulated so far without raising."""
+    import logging
+
+    page_a = [_qualifying_raw()]
+    page_b = [_qualifying_raw()]
+
+    fetch_returns = [page_a, page_b, []]  # [] = what 422 handler returns
+    cfg = ResolutionConfig(
+        output_csv_path=tmp_path / "out.csv",
+        page_size=1,  # match page length so partial-page stop doesn't fire early
+        inter_request_delay_s=0.0,
+        max_retries=0,
+        retry_base_delay_s=0.0,
+    )
+    with patch(
+        "pmbot.phase1_data.resolutions._fetch_closed_markets_page",
+        side_effect=fetch_returns,
+    ):
+        with caplog.at_level(logging.INFO, logger="pmbot.phase1_data.resolutions"):
+            records = build_resolution_whitelist(cfg)
+
+    assert len(records) == 2
+    assert records[0].market_id == "q1"
+    assert records[1].market_id == "q1"
+
+
+# ── Checkpoint / partial CSV ──────────────────────────────────────────────────
+
+
+def test_build_whitelist_checkpoint_fires_at_50_pages(tmp_path: Path) -> None:
+    """Every 50 pages, checkpoint is written; on completion partial is promoted to final."""
+    single = [_qualifying_raw()]
+    # 50 full pages of 1 record each (page_size=1 so each is "full"), then empty → stop
+    fetch_returns = [single] * 50 + [[]]
+    cfg = ResolutionConfig(
+        output_csv_path=tmp_path / "out.csv",
+        page_size=1,
+        inter_request_delay_s=0.0,
+        max_retries=0,
+        retry_base_delay_s=0.0,
+    )
+
+    with patch(
+        "pmbot.phase1_data.resolutions._fetch_closed_markets_page",
+        side_effect=fetch_returns,
+    ):
+        records = build_resolution_whitelist(cfg)
+
+    assert len(records) == 50
+    # Partial was promoted to final path
+    assert (tmp_path / "out.csv").exists()
+    # Partial file is gone after promotion
+    partial = tmp_path / "out.partial.csv"
+    assert not partial.exists()

@@ -176,3 +176,23 @@ gates (meaningless for closed markets). Named distinctly from `is_qualified_btc_
 - Shared HTTP pagination helper with `whitelist.py` — known DRY violation; deferred
   until a third caller justifies a shared `_fetch_page` abstraction.
 - Non-BTC markets — out of scope per SPEC.
+
+### 2026-04-25 — Phase 1.5 post-commit fix: 422 pagination cap + checkpoint writes
+
+**Bug:** Live smoke run crashed at offset ~250,100 with HTTP 422 Unprocessable Entity.
+The original "4xx raises immediately" policy treated 422 as a fatal error, losing ~25
+minutes of in-memory records that had never been flushed to disk.
+
+**Fix 1 — 422 is end-of-data, not an error.** `_fetch_closed_markets_page` now intercepts
+HTTP 422 before the generic 4xx re-raise, logs INFO "Gamma pagination cap reached at
+offset=N — stopping cleanly", and returns `[]`. `build_resolution_whitelist`'s existing
+`if not page: break` naturally terminates. No retries on 422; all other 4xx still raise.
+
+**Fix 2 — Periodic checkpoint writes.** `build_resolution_whitelist` writes accumulated
+records to `<output>.partial.csv` every 50 pages. On clean completion the partial is
+promoted to the final path via `Path.replace()` (atomic on Windows, overwrites if
+exists). A crash now loses at most 50 pages (~5,000 markets) of work instead of the
+entire run.
+
+**Gamma corpus size:** The 422 at offset ~250,100 implies approximately 250,000 total
+closed markets in the Gamma API corpus at the time of the smoke run (2026-04-25).

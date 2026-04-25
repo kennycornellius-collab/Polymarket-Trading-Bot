@@ -297,6 +297,12 @@ def _fetch_closed_markets_page(
             with urllib.request.urlopen(req, timeout=config.request_timeout_seconds) as resp:
                 return cast(list[GammaClosedMarketRecord], json.loads(resp.read()))
         except urllib.error.HTTPError as exc:
+            if exc.code == 422:
+                # 422 signals the API's hard pagination cap — treat as end-of-data.
+                logger.info(
+                    "Gamma pagination cap reached at offset=%d — stopping cleanly", offset
+                )
+                return []
             if 400 <= exc.code < 500:
                 logger.error("Gamma API client error code=%d url=%s — not retrying", exc.code, url)
                 raise
@@ -337,12 +343,21 @@ def _fetch_closed_markets_page(
 # ── Main entry points ─────────────────────────────────────────────────────────
 
 
+_CHECKPOINT_INTERVAL_PAGES = 50
+
+
 def build_resolution_whitelist(config: ResolutionConfig) -> list[ResolutionRecord]:
     """Fetch all closed Polymarket markets, filter to BTC binary shape, return ResolutionRecords.
 
-    Pagination terminates when a page returns fewer records than page_size (last page).
+    Pagination terminates when a page returns fewer records than page_size (last page),
+    or when the API returns HTTP 422 (hard pagination cap, ~250k offset empirically).
+    Writes a checkpoint to <output>.partial.csv every 50 pages; promotes it to the final
+    path on clean completion so a crash never loses more than 50 pages of work.
     Logs progress every 10 pages and emits a final summary.
     """
+    partial_path = config.output_csv_path.with_stem(
+        config.output_csv_path.stem + ".partial"
+    )
     records: list[ResolutionRecord] = []
     total_closed_seen = 0
     btc_binary_seen = 0
@@ -362,6 +377,15 @@ def build_resolution_whitelist(config: ResolutionConfig) -> list[ResolutionRecor
             btc_binary_seen += 1
             records.append(build_resolution_record(raw, config))
 
+        if page_num % _CHECKPOINT_INTERVAL_PAGES == 0:
+            write_resolution_csv(records, partial_path)
+            logger.info(
+                "checkpoint written: page=%d records=%d path=%s",
+                page_num,
+                len(records),
+                partial_path,
+            )
+
         if page_num % 10 == 0:
             logger.info(
                 "pagination progress: page=%d total_closed_seen=%d btc_binary_seen=%d",
@@ -375,6 +399,11 @@ def build_resolution_whitelist(config: ResolutionConfig) -> list[ResolutionRecor
 
         offset += config.page_size
         time.sleep(config.inter_request_delay_s)
+
+    if partial_path.exists():
+        config.output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        partial_path.replace(config.output_csv_path)
+        logger.info("checkpoint promoted to final path: %s", config.output_csv_path)
 
     flag_counts: dict[str, int] = {}
     training_eligible = 0
