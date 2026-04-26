@@ -51,7 +51,7 @@ If `SPEC.md` and anything else disagree, `SPEC.md` wins.
 - **Python 3.12** — no newer, no older
 - **Polars** — primary DataFrame library; lazy evaluation by default for ingestion
 - **DuckDB** — cross-partition queries over Parquet
-- **PostgreSQL** — market metadata, resolutions, OMS state, PnL. Never tick data.
+- **PostgreSQL** — market metadata, resolutions, OMS state, PnL. Never bar/time-series data.
 - **XGBoost** — oracle model (Phase 2)
 - **web3.py** — Polygon RPC interaction (Phase 6)
 - **pytest** — test runner
@@ -122,7 +122,7 @@ Do not declare a phase done if any of the above fails. Do not skip PROGRESS.md.
 - Do not add a phase or step that isn't in `SPEC.md`.
 - Do not "upgrade" Phase 2 to a neural model before XGBoost plateaus (explicit
   spec rule — SPEC.md Step 2.2).
-- Do not put tick data in PostgreSQL (SPEC.md Step 1.1).
+- Do not put bar/time-series data in PostgreSQL (SPEC.md Step 1.1).
 - Do not use linear interpolation in feature fusion — forward-fill only
   (SPEC.md Step 1.3, leakage risk).
 - Do not skip or weaken the leakage test in Step 1.4.
