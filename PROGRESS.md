@@ -254,3 +254,200 @@ unaffected.
 - Flags: walkover=2,335 (30%), resolved_early=206 (3%), disputed=17 (0.2%), invalid_resolution=2
 - **Training-eligible: 5,106** (66% of corpus)
 - disputed rate 0.2% confirms predicate fix (was 96% pre-fix)
+## 2026-04-25 — Design pivot: bar-level ingestion (was tick-level)
+
+**SPEC steps affected:** Phase 1, Step 1.1 Pass 2 (heavy-lift ingestion); Step 1.3
+(data fusion); Step 1.4 (leakage test framing); Phase 2, Step 2.1 (oracle feature
+set). All updated in the SPEC.md edit pass dated today.
+
+**Decision:** Replace tick-level orderbook capture with 1-minute price-bar ingestion
+via Polymarket's CLOB `/prices-history` endpoint (`fidelity=1`). Schema is `{t, p}`
+— Unix timestamp and price per bar. Not OHLCV: no high, no low, no open, no close,
+no per-bar volume.
+
+**Empirical confirmation (2026-04-25 spike):**
+- `/prices-history?market=<token_id>&fidelity=1&startTs=...&endTs=...` returns
+  1-minute bars cleanly on recent high-volume markets.
+- Endpoint is auth-free; no API key required for historical backfill.
+- A single response covers a 7-day window without pagination — 10,000+ records
+  returned in one shot.
+- Per-request latency ~500ms. Sequential backfill across 5,106 training-eligible
+  markets ~45 minutes; 10–15 minutes with concurrency.
+
+**Rationale (in order of strength):**
+
+a) **Signal scale.** TTE is 3–30 days. The oracle predicts a multi-day binary
+   outcome. Sub-minute price action is noise relative to that signal — there is
+   no edge to capture at tick resolution that the oracle wouldn't smooth away.
+
+b) **Storage.** ~1 GB total in compressed Parquet (5,106 markets × ~20,000 bars
+   × ~10 bytes/row). Tick-level capture would have been hundreds of GB.
+   Order-of-magnitude reduction.
+
+c) **Iteration speed.** Prior DRL-bot project on tick data ran hours per training
+   cycle, which made debugging and feature changes painful. XGBoost on bar data
+   runs in minutes — feature changes can be tested same-day.
+
+d) **Sufficiency.** Every feature in the SPEC's Phase 2.1 list is computable from
+   a price-only series: price level, returns over windows, realized vol from
+   squared returns, distance-to-strike, TTE interactions. Nothing in scope
+   requires sub-minute or L2 data.
+
+e) **No auth dependency for historical backfill.** `/prices-history` is open.
+   `/trades` requires `CLOB_API_KEY` (free, but requires Polygon wallet setup).
+   Pulling that into Phase 1 expands its dependency surface for no Phase 1
+   benefit. CLOB_API_KEY stays scoped to Phase 6 where it is actually required.
+
+**Foreclosed by the bar-data schema:** order book imbalance (no L2),
+trade-by-trade flow, sweep depth, sub-minute momentum, OHLC analysis (true
+range, wick patterns), per-bar volume features. None of these are listed as
+SPEC features — the foreclosure is accepted, not a regression.
+
+**Reversibility:** A future tick-level ingestion phase remains possible if the
+rule-based executor demonstrates that microstructure features would meaningfully
+improve the oracle. Two non-trivial blockers: Polymarket's tick-data retention
+horizon is unverified, and `/trades` requires API key. Future option, not a
+current dependency.
+
+**Three dead-canary findings worth documenting (additions to the running Phase 1
+list — total now five across this phase):**
+
+1) **`interval=1m` on `/prices-history` silently returns empty.** The `interval`
+   parameter accepts `1h`, `1d`, `1w`, `1M` only — `M` means **month** in their
+   schema, not minute. Passing `1m` gets a 200 OK with empty `history`. Bad
+   parameter, no error. Use `fidelity` (minutes) for sub-hour granularity,
+   never `interval`.
+
+2) **Sample bias (third occurrence in Phase 1).** Initial 5-record spike against
+   pre-2021 markets returned all empty for `/prices-history`, leading to a false
+   initial conclusion that the endpoint was broken. Recent high-volume markets
+   returned 10,000+ records cleanly. Default-sort sampling is unreliable for any
+   Polymarket schema discovery — the early-page records are 2020-era and behave
+   differently from current ones. **Pattern:** any future endpoint discovery in
+   this repo must sample across offset bands, not from offset 0.
+
+3) **`/trades` returns HTTP 401 "Unauthorized/Invalid api key" when called
+   without auth, even when other parameters are wrong.** Polymarket's auth
+   middleware fires before input validation. Implication: when probing `/trades`
+   semantics in the future, get the auth right first — otherwise every parameter
+   error masquerades as an auth error.
+
+**Files modified in this pivot:**
+- `SPEC.md` — Phase 1.1 Pass 2 rewritten, Step 1.3 fusion language updated, Step
+  1.6 QA criteria converted from L2-staleness to bar-gap rules, Step 2.1 feature
+  table replaced with explicit in-scope / out-of-scope blocks, new Design
+  Decisions section added before Full Component Summary.
+- `CLAUDE.md` — Postgres prohibition reworded from "tick data" to
+  "bar/time-series data" in the Stack section and the "What NOT to Do" list.
+
+**Deferred:** Phase 1.1 Pass 2 implementation (the actual `/prices-history`
+ingestion runner) — blocked on Phase 1.5.1 landing first; see next entry.
+
+## 2026-04-25 — Coverage gap discovered; Phase 1.5.1 introduced
+
+**SPEC step affected:** New Phase 1.5.1 sub-phase under Phase 1.5 — Incremental
+Resolution Refresh.
+
+**Discovery:** Pre-Pass-2 verification of `data/resolutions/resolved_markets.csv`
+revealed the most recent ~3 months of resolutions (Feb–April 2026) are absent.
+By-month histogram of `resolved_at` shows a sharp cliff after January 2026.
+Phase 1.5's smoke-run total of 7,658 records (5,106 training-eligible) is correct
+for what the run could see, but is not a complete picture of the closed-market
+corpus.
+
+**Root cause:** Gamma paginates `/markets?closed=true` oldest-to-newest by ID,
+with a hard offset cap at 250,100 (the same cap that produced the HTTP 422
+documented in the Phase 1.5 post-commit fix). Polymarket's archive exceeds the
+cap. Phase 1.5's pagination terminated cleanly at the cap — the 422 fix worked
+as intended — but never reached markets with offsets > 250,100, which are the
+most recent ones. Phase 1.5 walked the available archive correctly given offset
+pagination; it could not have discovered records that pagination structurally
+excludes.
+
+**Spike findings (2026-04-25):**
+- **`end_date_min` works.** Filters records where `endDate >= since_date`.
+  Filtered queries fit comfortably under the 250,100 offset cap.
+- **`closedTimeMin` is silently ignored.** Returns the unfiltered set — no
+  error, no warning. Yet another silent-fallback dead canary on the Gamma API.
+- **No working sort/order parameter found.** `order=desc`, `order_by=...`, and
+  `ascending=false` all either error or are silently ignored.
+  Reverse-chronological pagination is not available; filtered forward
+  pagination is the only path.
+
+**Phase 1.5.1 design:**
+- **New module:** `src/pmbot/phase1_data/resolutions_refresh.py`.
+- **Reuses Phase 1.5 primitives** — `build_resolution_record`,
+  `is_btc_binary_shape`, `ResolutionConfig`. No rewrites; the schema and
+  predicate logic from Phase 1.5 are correct, only the traversal strategy
+  changes.
+- **Logic:** load existing CSV → derive `since_date` from `max(resolved_at) −
+  7-day overlap buffer` (CLI override allowed) → paginate
+  `/markets?closed=true&end_date_min=<since_date>` → apply
+  `is_btc_binary_shape` filter → build records via `build_resolution_record`
+  → merge: append new, dedupe by `market_id` (keep newest write) → atomic
+  write-temp-then-rename.
+- **Operational shape:** designed for both one-time gap-plugging now AND
+  recurring weekly cron operation. New markets resolve daily; the corpus
+  stales without periodic refresh.
+
+**Why a separate sub-phase rather than a Phase 1.5 amendment:** Phase 1.5
+walked the available archive correctly given offset pagination. The growth of
+the archive past the cap is a different operational problem and requires a
+different traversal (filtered, anchored on `end_date_min`). Conflating the two
+muddies the audit trail and obscures the fact that Phase 1.5's design was
+sound for what it could see. Phase 1.5.1 stacks on top — it does not replace.
+
+**Deferred until Phase 1.5.1 lands:** Phase 1.1 Pass 2 (price-bar ingestion).
+No point ingesting price history for an incomplete label set — the missing 3
+months are the most recent and likely highest-quality training markets.
+
+---
+
+## 2026-04-26 — Phase 1.5.1: Incremental Resolution Refresh
+
+**SPEC coverage:** Step 1.5.1 (new module, gap-fill, ongoing freshness design).
+
+**What landed:**
+- `src/pmbot/phase1_data/resolutions_refresh.py` (~170 LOC): importable `run_refresh()`
+  function + `__main__` CLI entry point.
+- `tests/phase1_data/test_resolutions_refresh.py`: 13 unit tests (all green, 0.63s);
+  1 live integration test gated behind `@pytest.mark.integration`.
+- `SPEC.md` Step 1.5.1 corrected: `max(resolved_at)` → `max(end_date)`, 7-day → 14-day
+  buffer (field-mismatch fix; `end_date_min` filters on `endDate`, not `closedTime`).
+- Surgical change to `resolutions.py`: `_fetch_closed_markets_page` promoted to public
+  (`fetch_closed_markets_page`) with an `extra_params` dict kwarg; all existing tests
+  updated to the new name. No other Phase 1.5 internals touched.
+
+**Key decisions:**
+- **`end_date` not `resolved_at` for since_date offset.** The filter parameter
+  `end_date_min` compares against `endDate`; computing the offset from `closedTime`
+  (which `resolved_at` derives from) introduces silent gaps or overlaps because those
+  two fields skew by days on real markets.
+- **14-day overlap buffer** (up from 7). Markets sometimes take days to finalize after
+  `endDate`; 14 days is the empirically safe buffer for weekly-cadence refresh.
+- **Refresh-wins conflict policy.** When a `market_id` exists in both the existing CSV
+  and the refresh fetch, the refreshed row replaces the old one. Each conflict logs a
+  structured INFO event (old/new flags and outcome) so flag-drift can be monitored.
+- **`ColdStartRequired` domain exception, not `SystemExit`.** The importable function
+  raises `ColdStartRequired(ValueError)` so library callers can handle it; the CLI
+  wrapper catches and converts to `SystemExit` code 2.
+- **`--cold-start` as explicit footgun guard.** Auto-defaulting to "all of time" hits
+  the offset cap and produces an incomplete corpus. Cold start requires both
+  `--cold-start` AND `--since` explicitly; neither flag alone is accepted.
+- **Two hard-fail filter assertions** (per PROGRESS.md "silent fallback" pattern):
+  (a) first-page `endDate` must be ≥ `since_date − 1h` (catches `end_date_min` silently
+  ignored); (b) per-page BTC-binary count ceiling of 50,000 (catches unfiltered archive
+  returned).
+- **Merge preserves existing row order.** Phase 1.5 writes in API fetch order (no sort);
+  the merge preserves that order, replaces conflicts in-place, and appends net-new at
+  the end. Idempotent no-op produces byte-identical output.
+- **Atomic write via `.tmp → os.replace`.** No `.bak`; the module is idempotent and
+  re-runnable from cold start.
+
+**Deferred (explicit out-of-scope):**
+- Cron / systemd / scheduler wiring. The script is designed to be scheduled (weekly
+  cadence, `end_date_min` keeps slices small), but scheduling is ops, not Phase 1.5.1.
+- One-time gap fill (`--since 2026-01-01`) is an invocation of the new script after
+  this phase lands, not part of the commit.
+
+**Next:** Phase 1.1 Pass 2 (price-bar ingestion for the now-complete label set).

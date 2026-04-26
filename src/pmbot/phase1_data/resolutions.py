@@ -285,21 +285,25 @@ def build_resolution_record(
 # ── HTTP with retry ───────────────────────────────────────────────────────────
 
 
-def _fetch_closed_markets_page(
-    config: ResolutionConfig, offset: int
+def fetch_closed_markets_page(
+    config: ResolutionConfig,
+    offset: int,
+    extra_params: dict[str, str] | None = None,
 ) -> list[GammaClosedMarketRecord]:
     """Fetch one page of closed markets from the Gamma API with retry on 5xx/network errors.
 
     closed=true is honored server-side (verified empirically 2026-04-24).
+    extra_params are appended to the query string (e.g. {"end_date_min": "2026-01-01"}).
     4xx errors re-raise immediately. 5xx and URLError retry with exponential backoff.
     """
-    params = urllib.parse.urlencode(
-        {
-            "closed": "true",
-            "limit": config.page_size,
-            "offset": offset,
-        }
-    )
+    base: dict[str, str | int] = {
+        "closed": "true",
+        "limit": config.page_size,
+        "offset": offset,
+    }
+    if extra_params:
+        base.update(extra_params)
+    params = urllib.parse.urlencode(base)
     url = f"{config.gamma_api_base_url}/markets?{params}"
     req = urllib.request.Request(url, headers={"User-Agent": config.user_agent})
 
@@ -310,9 +314,7 @@ def _fetch_closed_markets_page(
         except urllib.error.HTTPError as exc:
             if exc.code == 422:
                 # 422 signals the API's hard pagination cap — treat as end-of-data.
-                logger.info(
-                    "Gamma pagination cap reached at offset=%d — stopping cleanly", offset
-                )
+                logger.info("Gamma pagination cap reached at offset=%d — stopping cleanly", offset)
                 return []
             if 400 <= exc.code < 500:
                 logger.error("Gamma API client error code=%d url=%s — not retrying", exc.code, url)
@@ -368,9 +370,7 @@ def build_resolution_whitelist(config: ResolutionConfig) -> list[ResolutionRecor
     path on clean completion so a crash never loses more than 50 pages of work.
     Logs progress every 10 pages and emits a final summary.
     """
-    partial_path = config.output_csv_path.with_stem(
-        config.output_csv_path.stem + ".partial"
-    )
+    partial_path = config.output_csv_path.with_stem(config.output_csv_path.stem + ".partial")
     records: list[ResolutionRecord] = []
     total_closed_seen = 0
     btc_binary_seen = 0
@@ -378,7 +378,7 @@ def build_resolution_whitelist(config: ResolutionConfig) -> list[ResolutionRecor
     page_num = 0
 
     while True:
-        page = _fetch_closed_markets_page(config, offset)
+        page = fetch_closed_markets_page(config, offset)
         if not page:
             break
 

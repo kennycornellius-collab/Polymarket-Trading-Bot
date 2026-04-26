@@ -21,7 +21,7 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    LIVE DATA FEEDS                       │
-│   Polymarket WebSocket (L2)  │  Deribit API (BTC IV)    │
+│  Polymarket WebSocket (price) │  Deribit API (BTC IV)   │
 └──────────────────┬───────────────────────┬──────────────┘
                    │                       │
                    ▼                       ▼
@@ -79,23 +79,48 @@ Pass 1 (whitelist builder) runs before any heavy data work to pre-qualify market
 **Pass 1 — Whitelist Builder:**
 Query Polymarket metadata (API or `pmxt` metadata files) and run each market through
 the Phase 0 filter. Output: `qualified_markets_whitelist.csv`. This runs first, before
-any tick data is touched.
+any bar data is fetched.
 
 **Pass 2 — Heavy Lift Ingestion:**
-Stream the `pmxt` archive using Polars lazy evaluation. Filter against the whitelist
-via predicate pushdown before any deeper parsing. Flatten the top-5 L2 book levels
-into a strict, flat schema during ingestion — not at training time.
+For each whitelisted market token, fetch 1-minute price bars from Polymarket's CLOB
+`/prices-history` endpoint:
 
-**Target Parquet schema:** flat, strongly typed, partitioned by `(market_id, date)`,
-compressed with `zstd`. DuckDB sits as a query layer on top for cross-partition
-metadata queries. PostgreSQL handles market metadata, resolution records, and OMS
-state. Tick data never goes into PostgreSQL.
+```
+GET /prices-history?market=<token_id>&fidelity=1&startTs=<unix>&endTs=<unix>
+```
+
+The `fidelity` parameter is the bin size in minutes. (The `interval` parameter accepts
+only predefined ranges — `1h`, `1d`, `1w`, `1M` — and silently falls back to a default
+for `1m`; do not use it.) The endpoint is auth-free, so historical backfill has no API
+key dependency. `CLOB_API_KEY` is not required here and remains scoped to Phase 6 live
+trading.
+
+**Response schema is `{t, p}`** — a Unix timestamp and a price per bar. There is **no**
+OHLC, no high/low, and **no per-bar volume**. Treat each bar as a price tick at
+1-minute resolution.
+
+Empirical sizing: ~500ms per request, one request per market token, no pagination
+needed for typical 3–30-day market lifespans (a single response returns 10,000+
+records). Sequential runtime ~45 minutes across 5,106 markets; with concurrency,
+10–15 minutes.
+
+Write each market's bars to a strict, flat schema during ingestion — not at training
+time.
+
+**Target Parquet schema:** flat, strongly typed, partitioned by `(market_id, date)`
+Hive-style, compressed with `zstd`. Path root: `data/bars/`. DuckDB sits as a query
+layer on top for cross-partition queries. PostgreSQL handles market metadata,
+resolution records, and OMS state. Bar data never goes into PostgreSQL.
+
+**Storage budget:** 5,106 training-eligible markets × ~20,000 bars average × ~10
+bytes/row in compressed Parquet ≈ **1 GB total**. An order of magnitude smaller than
+tick-level storage would be.
 
 **Storage layers:**
 
 | Layer | Tool | What lives here |
 |---|---|---|
-| Cold tick storage | Partitioned Parquet (Polars) | L2 snapshots, post-QA |
+| Cold bar storage | Partitioned Parquet (Polars) | 1-minute price bars `{t, p}`, post-QA |
 | Query coordination | DuckDB | Cross-partition queries, training window assembly |
 | Metadata + state | PostgreSQL | Market metadata, resolutions, OMS state, PnL |
 
@@ -111,7 +136,9 @@ Store as time-series Parquet partitioned by date. Timestamp every record at the
 
 ### Step 1.3 — Data Fusion (Polars, Strict Knowledge Cutoff)
 
-Align Deribit IV (~1min resolution) with Polymarket L2 tick data (high-frequency).
+Align Deribit IV (~1min resolution) with Polymarket 1-minute price bars. Both streams
+are at minute resolution — alignment is a direct asof-join on timestamp, **not a
+downsampling step**. Do not aggregate twice; bars are ingested at the target resolution.
 
 **Interpolation strategy — decide once, apply everywhere:**
 - Use **forward-fill only** (never linear interpolation near resolution events)
@@ -136,14 +163,57 @@ Separate ingestion for Polymarket resolution outcomes:
 - Actual resolution timestamp (not scheduled expiry)
 - Disputed/early/walkover markets flagged and excluded from training
 
+### Step 1.5.1 — Incremental Resolution Refresh
+
+**Purpose.** Phase 1.5 walked Gamma's paginated `/markets?closed=true` endpoint and
+produced 7,658 records (5,106 training-eligible). Empirically, Gamma paginates
+oldest-to-newest by ID and has a **hard offset cap at 250,100**. Polymarket has more
+closed markets than the cap allows, so the most recent ~3 months of resolved markets
+(Feb–Apr 2026 at the time of this writing) are missing from `resolved_markets.csv`.
+Step 1.5.1 plugs that gap and provides ongoing freshness.
+
+**Working approach (validated via spike).** Gamma honors the `end_date_min` parameter
+(filters records where `endDate >= since_date`), and the filtered slice is small
+enough to fit under the offset cap. Other candidate parameters do **not** work:
+`closedTimeMin` is silently ignored (returns unfiltered results), and `order=desc`,
+`ascending=false`, and `order_by` all either error or are silently ignored.
+
+**New module:** `src/pmbot/phase1_data/resolutions_refresh.py`.
+
+**Reuse, do not rewrite** — these come from Phase 1.5:
+- `build_resolution_record`
+- `is_btc_binary_shape`
+- `ResolutionConfig`
+
+**Logic:**
+1. Load existing `resolved_markets.csv`.
+2. Default `since_date` = `max(end_date) − 14-day overlap buffer`. Allow CLI override.
+   (`end_date_min` filters on `endDate`, not `closedTime`; use the same field for the
+   offset computation to avoid silent gaps. 14-day buffer accounts for markets that
+   resolve days after their stated `endDate`.)
+3. Paginate Gamma `/markets?closed=true&end_date_min=<since_date>`.
+4. Apply `is_btc_binary_shape` filter to each page.
+5. Build records via `build_resolution_record`.
+6. Merge: append new records to existing, dedupe by `market_id` (keep newest write).
+7. Atomic write: write to `<path>.tmp`, then `os.replace` to final path.
+
+**Cadence.** Run once now to plug the ~3-month gap. Schedule weekly via cron — new
+markets resolve daily, so the corpus stales without periodic refresh. Step 1.5.1 is
+the script that handles ongoing freshness, not just the one-time backfill.
+
 ### Step 1.6 — Data Quality Validation
 
 QA pass outputs a per-market rejection report:
-- Crossed books (bid ≥ ask): drop
-- Stale snapshots: detect and discard
-- Tick gaps over N seconds: exclude from training windows
+- Bars with non-finite or non-positive prices: drop
+- Bar gaps over N minutes within a market's training window: exclude that window
+  (N to be calibrated empirically during Phase 1.6, expected on the order of 5–15
+  minutes given typical Polymarket bar production rates)
+- Markets with fewer than M total bars over their lifespan: exclude from training
+- Duplicate timestamps within a market: dedupe (keep last)
 
 High rejection rate on a specific market → exclude that market from training entirely.
+(Note: crossed-book and L2-staleness checks are no longer applicable — schema is
+`{t, p}`.)
 
 ---
 
@@ -159,9 +229,24 @@ BTC binary market**. Single Sigmoid output. No Softmax, no multi-outcome logic.
 | BTC ATM IV | Deribit | Nearest expiry matching market TTE |
 | IV term structure slope | Deribit | Contango vs. backwardation regime signal |
 | BTC spot momentum | Exchange API | Rolling returns at 1h, 4h, 24h |
-| Market mid-price | Polymarket L2 | Crowd-wisdom prior — do not ignore this |
+| Market price level | Polymarket `/prices-history` (1-min bars) | Crowd-wisdom prior — do not ignore this |
+| Market price returns | Derived from 1-min bars | Returns over 5m, 15m, 1h, 4h windows |
+| Realized volatility | Derived from 1-min bars | Sum of squared returns over 1h, 4h windows |
 | Time-to-expiry (TTE) | Market metadata | Both raw days and log(TTE) |
 | Distance-to-strike | Derived | (BTC spot − strike) / strike, normalized |
+| TTE × distance-to-strike | Derived (training-time) | Interaction term — proximity matters more near expiry. Computed at training-time from the joined Deribit + Polymarket dataset; not stored in any single source's raw form. |
+
+**In scope:** price level, returns over windows, realized vol from squared returns,
+distance from strike, TTE features, TTE × distance interactions.
+
+**Foreclosed by the bar-data pivot — explicitly out of scope:**
+- Order book imbalance (no L2 in `/prices-history`)
+- Trade-by-trade flow features (no individual trades)
+- Sub-minute momentum or microstructure signals (no sub-minute resolution)
+- Per-bar volume features (schema is `{t, p}` — no volume column)
+- Per-bar OHLC analysis (true range, wick patterns, etc. — no OHLC)
+
+These foreclosures are accepted. Rationale lives in the Design Decisions section.
 
 ### Step 2.2 — Model
 
@@ -506,6 +591,50 @@ The rule-based system remains the decision maker; RL becomes a parameter tuner.
 This is not a consolation prize. This is the correct engineering sequence:
 build the knife, use the knife, understand what the knife can't do, then consider
 the laser.
+
+---
+
+## Design Decisions
+
+This section captures cross-cutting choices that span phases. Each is a deliberate
+tradeoff, not an oversight.
+
+**1. 1-minute price bars over tick / L2 data.**
+- *Signal scale.* The oracle predicts a 3–30-day binary outcome. Sub-minute price
+  action is noise relative to that horizon.
+- *Storage.* ~1 GB total in compressed Parquet (5,106 markets × ~20,000 bars × ~10
+  bytes/row). Order of magnitude smaller than tick-level.
+- *Training time.* 10–15 minutes concurrent backfill versus hours-to-days for tick
+  ingestion.
+- *Sufficiency.* Every feature listed in Step 2.1 is computable from `{t, p}` bars;
+  nothing in scope requires sub-minute or L2 data.
+- *No auth dependency.* `/prices-history` is auth-free. Tick-level data via `/trades`
+  would require `CLOB_API_KEY` (free, but requires Polygon wallet setup) — pulling
+  that into Phase 1 expands its dependency surface for no Phase 1 benefit.
+  `CLOB_API_KEY` stays scoped to Phase 6 where it is actually required.
+
+**2. 1-minute granularity over 5-minute.**
+1-minute is the finest resolution `/prices-history` exposes via `fidelity=1`.
+Aligning with Deribit IV's ~1-minute cadence eliminates a downsampling step.
+5-minute would discard information for no storage win at the 1 GB total size.
+
+**3. Schema constraint: `{t, p}`, not OHLCV.**
+The endpoint returns timestamp and price per bar. No high, low, open, close, or
+volume. All foreclosures listed in Step 2.1 ("Foreclosed by the bar-data pivot")
+follow from this constraint.
+
+**4. Foreclosed but recoverable later.**
+A future tick-level ingestion phase remains possible if the rule-based executor
+demonstrates that microstructure features would meaningfully improve the oracle.
+Two non-trivial blockers if pursued: Polymarket's tick-data retention horizon is
+unverified, and `/trades` requires `CLOB_API_KEY`. This is a future option, not a
+current dependency.
+
+**5. Preserved across the pivot.**
+Phase 0 BTC filter, Phase 1.1 Pass 1 whitelist, Phase 1.5 resolution metadata
+pipeline, Phase 6 Polygon RPC infrastructure, the Brier ≤ 0.10 go-live gate, the
+Phase 2.2 explicit-XGBoost-before-NN rule, and the Step 1.4 leakage test are
+unchanged. The pivot is about data granularity only, not architectural restructuring.
 
 ---
 

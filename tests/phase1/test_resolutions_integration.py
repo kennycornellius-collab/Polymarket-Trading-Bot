@@ -15,7 +15,7 @@ import pytest
 
 from pmbot.phase1_data.resolutions import (
     ResolutionConfig,
-    _fetch_closed_markets_page,
+    fetch_closed_markets_page,
     build_resolution_record,
     is_btc_binary_shape,
 )
@@ -38,7 +38,7 @@ def test_closed_markets_schema_and_resolution_pipeline() -> None:
 
     # Paginate until we have enough qualifying records or hit the scan cap
     while len(btc_records) < _TARGET_BTC_RECORDS and offset < _MAX_SCAN:
-        page = _fetch_closed_markets_page(cfg, offset=offset)
+        page = fetch_closed_markets_page(cfg, offset=offset)
         if not page:
             break
 
@@ -167,7 +167,7 @@ def test_uma_status_predicate_semantics() -> None:
     raw_all: list = []
     for band_offset in band_offsets:
         for page_idx in range(pages_per_band):
-            page = _fetch_closed_markets_page(cfg, offset=band_offset + page_idx * cfg.page_size)
+            page = fetch_closed_markets_page(cfg, offset=band_offset + page_idx * cfg.page_size)
             if not page:
                 break
             raw_all.extend(page)

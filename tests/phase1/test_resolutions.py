@@ -574,13 +574,13 @@ def test_fetch_page_422_returns_empty_and_logs_info(
     """HTTP 422 from Gamma signals the hard pagination cap; must return [] and log INFO."""
     import logging
 
-    from pmbot.phase1_data.resolutions import _fetch_closed_markets_page
+    from pmbot.phase1_data.resolutions import fetch_closed_markets_page
 
     cfg = _cfg(tmp_path)
     with patch("pmbot.phase1_data.resolutions.urllib.request.urlopen") as mock_url:
         mock_url.side_effect = _http_error(422)
         with caplog.at_level(logging.INFO, logger="pmbot.phase1_data.resolutions"):
-            result = _fetch_closed_markets_page(cfg, offset=250100)
+            result = fetch_closed_markets_page(cfg, offset=250100)
 
     assert result == []
     assert mock_url.call_count == 1  # no retries on 422
@@ -605,7 +605,7 @@ def test_build_whitelist_422_terminates_cleanly_and_returns_prior_records(
         retry_base_delay_s=0.0,
     )
     with patch(
-        "pmbot.phase1_data.resolutions._fetch_closed_markets_page",
+        "pmbot.phase1_data.resolutions.fetch_closed_markets_page",
         side_effect=fetch_returns,
     ):
         with caplog.at_level(logging.INFO, logger="pmbot.phase1_data.resolutions"):
@@ -633,7 +633,7 @@ def test_build_whitelist_checkpoint_fires_at_50_pages(tmp_path: Path) -> None:
     )
 
     with patch(
-        "pmbot.phase1_data.resolutions._fetch_closed_markets_page",
+        "pmbot.phase1_data.resolutions.fetch_closed_markets_page",
         side_effect=fetch_returns,
     ):
         records = build_resolution_whitelist(cfg)
