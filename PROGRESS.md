@@ -451,3 +451,107 @@ months are the most recent and likely highest-quality training markets.
   this phase lands, not part of the commit.
 
 **Next:** Phase 1.1 Pass 2 (price-bar ingestion for the now-complete label set).
+
+---
+
+## 2026-04-27 — Phase 1.5.1 Addendum: Gap-Fill Execution and Findings
+
+Addendum to the 2026-04-26 entry above. Records the live integration test result,
+the two-pass gap-fill execution, anomalies discovered in the corpus, and follow-up
+issues filed for future phases.
+
+### Done checklist (complete)
+
+5. Live integration test passed (`pytest -m integration`, 4:53s) — confirmed `end_date_min`
+   is honored by Gamma at time of writing.
+
+(Items 1–4 recorded in the 2026-04-26 entry.)
+
+### One-time gap-fill execution
+
+Required two passes — the first pass hit the Gamma offset cap mid-fetch.
+
+**Pass 1:** `python -m pmbot.phase1_data.resolutions_refresh --since 2026-01-01`
+- Walked 2,501 pages, hit the 250,100 offset cap mid-fetch (logged cleanly:
+  `Gamma pagination cap reached at offset=250100 — stopping cleanly`).
+- Wrote 1,565 new rows. CSV: 7,658 → 9,223. Zero conflicts.
+- **The cap truncated the recent tail.** Post-pass-1, max `resolved_at` was
+  2026-04-01; the histogram showed only 152 records for 2026-03 and 1 for
+  2026-04 — far below expected volume. Gamma paginates oldest-to-newest within
+  a filtered slice, so a wide slice hits the cap before it reaches recent markets.
+
+**Pass 2:** `python -m pmbot.phase1_data.resolutions_refresh --since 2026-03-01`
+- 56-day slice, no cap hit.
+- Wrote 1,183 new rows. CSV: 9,223 → 10,406. Zero conflicts.
+- The overlap window (~828 markets with `end_date >= 2026-02-15`) produced zero
+  conflicts — all refetched rows were byte-identical.
+
+**Final corpus state:**
+- Total rows: 7,658 → **10,406**.
+- Monthly histogram ramps cleanly through 2026-03 (1,111) and 2026-04 (225 — partial
+  month).
+- Top `resolved_at`: late April 2026 (within hours of the run).
+
+### Positive finding
+
+**Phase 1.5's flag-derivation predicates are stable on re-fetch.** Zero conflicts across
+two overlap windows totalling ~1,674 markets. The disputed-predicate fix from Phase 1.5
+is not flipping flags on re-fetch within the tested windows. (Caveat: re-fetching the
+same markets produces the same Gamma responses if UMA status hasn't changed, so this isn't
+a perfect predicate-quality probe — but it's not nothing.)
+
+### Anomalies noted (not fixed here)
+
+**2025-09 spike:** 3,733 resolutions in one month versus ~700-800/month before and after.
+Confirmed cause: Polymarket received CFTC approval to return to the U.S. market in
+September 2025 (alongside a $200M funding round at a $9B valuation), launched a U.S.
+beta, and saw a mass activity spike. Worth flagging for training data balance — if
+BTC binaries cluster heavily in 2025-09, that one month could dominate the loss surface.
+Investigate if/when training data shape becomes a concern.
+
+**Long-dated markets in CSV:** 7 rows with `end_date = 2027-01-01` — early-resolved
+markets whose scheduled deadlines are in the future. This is a real Polymarket schema
+property (`endDate` = scheduled deadline, `closedTime` = actual resolution), not data
+corruption. It surfaces a design issue described in Follow-up #2 below.
+
+### Follow-ups filed (deferred, not blocking Phase 1.6)
+
+1. **Cap-detection silent failure.** When the Gamma offset cap trips mid-fetch, the
+   current code logs the event and proceeds to merge whatever it fetched. This produces
+   a "successful" run that is actually incomplete — the recent tail is missing. The
+   Phase 1.5.1 hard-fail assertions catch Gamma silently ignoring parameters but do not
+   cover this case. Fix: detect the cap signal and raise rather than merge, OR auto-chunk
+   the slice into sub-windows. Matters most for ad-hoc gap fills with wide `--since`
+   values; weekly cron will always have a small slice and should not trip this.
+
+2. **`max(end_date)` auto-since default is broken when long-dated markets are present.**
+   With 7 rows at `end_date = 2027-01-01`, `max(end_date) − 14d = 2026-12-18` — a
+   future date. Passing that to Gamma as `end_date_min` returns zero records. Weekly
+   cron would silently fetch nothing on its first auto-default run. Fix: use a robust
+   percentile of `end_date` (e.g., 95th percentile or median) or revert to
+   `max(resolved_at) − 14d` with a longer buffer. Requires a second SPEC.md Step 1.5.1
+   correction. Must be resolved before the first weekly cron run.
+
+3. **Cron / scheduler wiring** — explicitly deferred to ops as planned. Blocked on
+   Follow-up #2 being resolved first.
+
+### Lessons forward
+
+- **Slice width that fits under the cap at current Polymarket volume: ~110 days.** A
+  115-day slice (`--since 2026-01-01` on 2026-04-26) hit the cap; a 56-day slice
+  (`--since 2026-03-01`) did not. For any ad-hoc gap fill wider than ~100 days, plan
+  for multiple passes.
+- **Page count is independent of post-filter record count.** Runtime is governed by raw
+  pages walked, not BTC records found. A 25-day live integration test (996 BTC records)
+  and Phase 1.5's full archive walk (~7,658 BTC records) took similar wall-clock time
+  because both walked ~2,000-2,500 pages at `page_size=100`.
+- **The hard-fail assertion suite caught its target failure modes but missed one** (cap
+  mid-fetch). The pattern of "Polymarket silently accepts wrong input" now has a fourth
+  recorded instance. Treat assertion design as a class of bug, not one-off cases.
+
+### Confirmed out of scope (not done in this phase)
+
+- Cron / systemd / scheduler wiring.
+- Refactor of Phase 1.5 internals beyond the one-function promotion.
+- The three follow-ups filed above.
+- Phase 1.6 QA logic.
