@@ -642,6 +642,11 @@ def run_ingest(
         logger.info("--lookup-only: done")
         return
 
+    # ── Dry-run: log slice and exit without touching any files ────────────────
+    if dry_run:
+        logger.info("dry-run: would fetch bars for %d markets", len(market_ids))
+        return
+
     # ── Load lookup ───────────────────────────────────────────────────────────
     if not config.lookup_path.exists():
         raise RuntimeError(f"Lookup Parquet not found: {config.lookup_path}")
@@ -698,15 +703,6 @@ def run_ingest(
             continue
         attempt_count = (prior["attempt_count"] + 1) if prior else 1
         work_items.append((mid, market_map[mid], lookup_dict[mid], attempt_count))
-
-    if dry_run:
-        for mid, _, lrow, _ in work_items:
-            logger.info(
-                "dry-run: would fetch market_id=%s yes_token_id=%.20s...",
-                mid,
-                lrow["yes_token_id"],
-            )
-        return
 
     logger.info("starting bar fetch: %d markets (max_workers=%d)", len(work_items), config.max_workers)
 
@@ -789,7 +785,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--lookup-only",
         action="store_true",
-        help="Run only the lookup pre-pass, then exit",
+        help="Run only the lookup pre-pass, then exit. "
+        "Combined with --dry-run: logs what would be fetched and exits without writing anything.",
     )
     args = parser.parse_args(argv)
 

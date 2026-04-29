@@ -476,6 +476,21 @@ def test_partition_column_stripping(tmp_config: IngestConfig) -> None:
 # ── Integration test ──────────────────────────────────────────────────────────
 
 
+def test_dry_run_works_without_lookup_file(
+    tmp_config: IngestConfig, minimal_csv: Path
+) -> None:
+    """--dry-run returns cleanly even when _market_lookup.parquet does not exist."""
+    assert not tmp_config.lookup_path.exists()
+
+    # Should not raise, should not create any files
+    run_ingest(minimal_csv, tmp_config, dry_run=True)
+
+    # Nothing written under target_path_root
+    if tmp_config.target_path_root.exists():
+        written = list(tmp_config.target_path_root.iterdir())
+        assert not written, f"dry-run wrote files: {written}"
+
+
 @pytest.mark.integration
 def test_integration_real_clob(tmp_config: IngestConfig, tmp_path: Path) -> None:
     """Fetch bars for one known-good market end-to-end.
