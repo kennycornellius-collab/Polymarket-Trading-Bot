@@ -28,7 +28,15 @@
       "Bash(python -m pytest tests/phase1/test_resolutions.py -v --tb=short)",
       "Bash(python -m pytest tests/phase1/test_resolutions_integration.py -v -m integration)",
       "Bash(python *)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(pytest -m \"not integration\" --tb=no -q)",
+      "Bash(mypy --strict src/pmbot)",
+      "Bash(ruff check *)",
+      "Bash(ruff format *)",
+      "Bash(pytest --collect-only -q)",
+      "Bash(sed 's/::test_[^:]*$//')",
+      "Bash(pip index *)",
+      "Bash(pip install *)"
     ]
   }
 }
