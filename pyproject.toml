@@ -1,25 +1,37 @@
 [build-system]
-   requires = ["setuptools>=68"]
-   build-backend = "setuptools.build_meta"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-   [project]
-   name = "pmbot"
-   version = "0.0.1"
-   requires-python = ">=3.12"
+[project]
+name = "pmbot"
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = [
+    "polars==1.40.1",
+    "duckdb==1.5.2",
+]
 
-   [tool.setuptools.packages.find]
-   where = ["src"]
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.3",
+    "mypy==1.20.2",
+    "ruff==0.15.12",
+]
 
-   [tool.pytest.ini_options]
-   pythonpath = ["src"]
-   testpaths = ["tests"]
-   markers = [
-       "integration: live API tests; skipped by default (run with -m integration)",
-   ]
+[tool.setuptools.packages.find]
+where = ["src"]
 
-   [tool.mypy]
-   strict = true
-   packages = ["pmbot"]
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: live API tests; skipped by default (run with -m integration)",
+]
 
-   [tool.ruff]
-   line-length = 100
+[tool.mypy]
+strict = true
+packages = ["pmbot"]
+
+[tool.ruff]
+line-length = 100

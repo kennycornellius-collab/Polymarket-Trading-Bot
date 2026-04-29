@@ -555,3 +555,77 @@ corruption. It surfaces a design issue described in Follow-up #2 below.
 - Refactor of Phase 1.5 internals beyond the one-function promotion.
 - The three follow-ups filed above.
 - Phase 1.6 QA logic.
+
+---
+
+## 2026-04-29 — Phase 1.1 Pass 2: Bar Ingestion
+
+**SPEC step covered:** Step 1.1 Pass 2 — Heavy Lift Bar Ingestion. Fetches 1-minute
+price bars from CLOB `/prices-history` for all training-eligible markets, writes
+Hive-partitioned Parquet to `data/bars/`, and emits a run-state manifest.
+
+### New files
+- `src/pmbot/phase1_data/bars_ingest.py` — full ingestion module (~500 LOC)
+- `tests/phase1_data/test_bars_ingest.py` — 17 unit tests + 1 integration test
+- `pyproject.toml` — added `polars==1.40.1`, `duckdb==1.5.2`, dev group pinned
+
+### Key decisions
+
+**Token source (pre-planning gap):** `resolved_markets.csv` (Phase 1.5 output) has no
+`token_id` or `createdAt` columns. Resolution: a separate `_market_lookup.parquet` is
+built from Gamma `/markets/{id}` before bar fetching. Three-path startup logic:
+cold-build, delta-fetch (appends missing rows), or `--rebuild-lookup` full refresh.
+
+**clobTokenIds shape confirmed by spike (2026-04-29):** JSON-encoded string, NOT a
+native array. `json.loads()` required. YES token selected by index position in `outcomes`
+array (Phase 1.5 pattern reused), not by assuming index 0. Hard-fail on unexpected shape
+so the operator sees issues at lookup-build time, not 42 min later.
+
+**createdAt fallback policy:** If Gamma response lacks `createdAt`, write
+`status=fail, error_reason="missing_created_at"` to manifest and skip bar fetch.
+No arbitrary day-count fallback (avoids silent-bad-data). If >1% of markets hit this in
+the smoke run, switch to `start_ts=0` sentinel before the full run.
+
+**YES token only:** `price_no = 1 − price_yes` by construction for binary markets. One
+bar series per market. Halves disk footprint vs. fetching both tokens.
+
+**Bar write — manual Hive partitioning:** Polars 1.40.1 includes partition columns (`market_id`,
+`utc_date`) in the written Parquet file content when using `write_parquet(..., partition_by=[...])`.
+Fixed by constructing Hive paths manually and writing `{t, p}` only per partition.
+Confirmed by `test_partition_column_stripping`.
+
+**CLOB response shape confirmed by spike (2026-04-29):** `{"history": [{t, p}, ...]}`.
+Not a bare list. Market 1817348 (BTC $74k-$76k band, Apr 2026): 10,007 bars, 60s median Δt.
+
+**Integration test marker — added `addopts`:** Existing pyproject.toml documented
+integration tests as "skipped by default" but had no enforcement. Added
+`addopts = "-m 'not integration'"` to match documented behavior. All 5 existing integration
+tests (resolutions phase) unaffected.
+
+**PyArrow:** Not needed. Polars 1.40.1 partitioned writes succeed without PyArrow.
+Manual path construction eliminates any future dependency on Polars version behavior.
+
+### Hard-fail predicates (locked)
+- `bar_count < 10` → `bar_count_below_min`
+- `median(Δt) > 300s` → `median_dt_exceeds_threshold`
+- Any bar outside `[start_ts, end_ts + 60]` → `bar_outside_window`
+- `max(Δt)` is NOT a predicate — real thin markets have real gaps.
+
+### Done checklist
+1. `pytest tests/phase1_data/test_bars_ingest.py` — 17/17 unit tests green (0.88s)
+2. `mypy --strict src/pmbot/phase1_data/bars_ingest.py` — zero errors
+3. `ruff check src/pmbot/phase1_data tests/phase1_data` — zero errors
+4. PyArrow smoke check — passed without pin; no PyArrow in `dependencies`
+5. Integration test — `pytest -m integration tests/phase1_data/test_bars_ingest.py` green (1.33s)
+6. Full suite — 126/126 pass, 5 integration deselected (1.91s)
+
+### Deferred follow-ups (out of scope here)
+- Tune `max_workers` from empirical baseline after smoke run (current default: 4, ~22 min wall clock)
+- Calibrate hard-fail predicates against post-run manifest distribution (Phase 1.6 prep)
+- Verify if Gamma supports batch market lookup by multiple IDs (reduce ~42 min lookup build)
+- Switch `createdAt` fallback to `start_ts=0` sentinel if missing rate >1% in smoke run
+
+### Next steps (operator — before full run)
+1. Run sample-bias smoke: `--limit 50` at offsets 0, 1000, 2500, 4500
+2. Inspect manifest: success rate, median bar_count, median Δt, missing_created_at count
+3. If smoke is clean, launch full run (add `--resume` if it crashes mid-way)
