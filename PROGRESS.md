@@ -629,3 +629,21 @@ Manual path construction eliminates any future dependency on Polars version beha
 1. Run sample-bias smoke: `--limit 50` at offsets 0, 1000, 2500, 4500
 2. Inspect manifest: success rate, median bar_count, median Δt, missing_created_at count
 3. If smoke is clean, launch full run (add `--resume` if it crashes mid-way)
+
+### 2026-04-29 — Phase 1.1 Pass 2 post-commit fix: --dry-run crash when lookup Parquet absent
+
+**Bug:** The `--dry-run` path correctly skipped the lookup-build step when `_market_lookup.parquet`
+was absent, but then unconditionally tried to open the same file immediately after — crashing before
+any real work began. A user running `--dry-run` on a fresh clone (no data synced yet) hit a
+`FileNotFoundError` on the very first invocation.
+
+**Fix:** Guard the post-skip read with the same existence check. `--dry-run` now completes cleanly
+whether or not the lookup file is present.
+
+**New test:** `test_dry_run_works_without_lookup_file` — runs the full dry-run code path against a
+temp directory with no Parquet file present and asserts exit without error.
+
+**Lesson:** Dry-run paths need their own test coverage. The code path appeared correct from reading
+it, but "the happy-path test passes" does not cover the branch taken when prerequisite files are
+absent. From here on, any `--dry-run` or `--skip-*` flag introduced in this repo gets at least one
+test that exercises it against a cold (data-absent) environment.
