@@ -647,3 +647,117 @@ temp directory with no Parquet file present and asserts exit without error.
 it, but "the happy-path test passes" does not cover the branch taken when prerequisite files are
 absent. From here on, any `--dry-run` or `--skip-*` flag introduced in this repo gets at least one
 test that exercises it against a cold (data-absent) environment.
+
+### 2026-05-01 — Phase 1.1 Pass 2: Two defects fixed from smoke band 0 (offset 0, 50 markets)
+
+#### Defect 1 — CLOB /prices-history window cap (14 days)
+
+**Finding:** CLOB rejects requests where `endTs − startTs > 1,209,600 s` (14 days) with HTTP 400
+`"invalid filters: 'startTs' and 'endTs' interval is too long"`. Cap confirmed at exactly
+1,209,600 s by bisection against two tokens (one 2021-era, one recent) on 2026-05-01.
+Constraint is universal, not era-specific. Affected: 248 of 7,011 markets with valid windows (3.5%).
+
+**Fix — `_split_window` + chunked `fetch_bars`:**
+- `IngestConfig.clob_max_window_seconds = 14 * 86400` (one day below the rejection threshold).
+- New private helper `_split_window(start_ts, end_ts, max_window)` splits into adjacent,
+  non-overlapping chunks: chunk N ends at T, chunk N+1 starts at T+1.
+- `fetch_bars` delegates single-chunk fetches to `_fetch_bars_chunk` (the original monolithic
+  body, now private). Multi-chunk: fetches sequentially, concatenates in chronological order.
+- Chunks fetch sequentially — NOT parallelised — to avoid multiplying effective concurrent
+  request count by chunk count against the cautious rate-limit baseline.
+- Chunk failure: raises `RuntimeError("chunk_fetch_failed:{i}/{n}")` with no partial returns.
+  Manifest records `status=fail` with the descriptive reason.
+
+#### Defect 2 — Inverted windows (end_ts ≤ start_ts)
+
+**Finding:** Audit reported `min(end_date − createdAt) = −29.29 days` for some markets.
+Markets exist where `min(end_date, resolved_at) < createdAt` in Gamma metadata — likely
+late-corrected resolution metadata or markets resolved before their official creation record.
+Pass 2 was sending these to CLOB without checking, recording `status=fail` with a
+non-descriptive error message that masked the real cause.
+
+**Fix — `_InvertedWindowError` in `derive_window`:**
+- `derive_window` raises `_InvertedWindowError("inverted_window")` when `end_ts <= start_ts`.
+- `_worker` catches `_InvertedWindowError` before the generic `Exception` handler, logs a
+  WARNING (no traceback — this is expected upstream-data quirk, not a bug), and writes
+  `status=fail, error_reason="inverted_window", bar_count=0` to the manifest. No CLOB call.
+
+#### Tests added (7 new, all green)
+
+- `test_split_window_under_cap` — window ≤ cap → single tuple
+- `test_split_window_exact_cap` — window == cap → single tuple (boundary)
+- `test_split_window_over_cap` — 3× cap → 3 adjacent non-overlapping chunks, last ends at end_ts
+- `test_fetch_bars_chunked` — window > cap → 2 CLOB requests, results concatenated
+- `test_fetch_bars_chunked_partial_failure` — chunk 2/3 fails → `chunk_fetch_failed:2/3`
+- `test_derive_window_inverted_rejected` — inverted timestamps → `_InvertedWindowError`
+- `test_run_ingest_inverted_window_logged` — end-to-end → `status=fail, error_reason="inverted_window"`, no CLOB call
+
+Full suite: 25/25 unit tests green, mypy --strict clean, ruff clean.
+
+#### Cross-phase lesson (recurring pattern, third instance in Phase 1)
+
+Undocumented endpoint constraints surface at scale, not in single-market spikes:
+- Phase 1.5 missed the 250,100 Gamma offset cap.
+- Phase 1.5.1 missed the cap-mid-fetch silent-merge problem.
+- Phase 1.1 Pass 2 missed the 14-day CLOB window cap and the inverted-window class.
+
+**Rule added to spike checklist:** Future phases integrating new endpoints must test with
+parameter values at the upper end of plausible production ranges, not just representative
+middles. A spike that proves the endpoint works for one market at one window size does not
+prove it works for 7,000 markets across all window sizes.
+
+### 2026-05-01 — Phase 1.1 Pass 2: Empty end_date / resolved_at fallback (35 markets)
+
+#### Finding
+
+Full run surfaced 35 markets raising `ValueError: Invalid isoformat string: ''` from
+`derive_window`. Probe of a representative market (`market_id=571730`) confirmed the pattern:
+`end_date=""`, but `resolved_at="2025-08-24T21:50:57+00:00"` and `created_at` both valid.
+Phase 1.5 retained these as training-eligible (no quality flags); Phase 1.1 Pass 2 was
+rejecting them because `derive_window` unconditionally called `fromisoformat` on both fields.
+`resolved_at` alone is a valid upper bound — these markets were recoverable, not legitimately
+bad data.
+
+#### Fix — lenient upper bound in `derive_window`
+
+- New helper `_parse_optional_ts(raw)` returns `datetime | None` for empty, whitespace, or
+  unparseable strings (catches the `ValueError` gracefully for the upper-bound fields only).
+- `derive_window` now accepts any combination of empty/populated `end_date` and `resolved_at`:
+  - Both populated → `upper = min(end_date, resolved_at)` (original behavior).
+  - One empty → `upper = the populated field`.
+  - Both empty/unparseable → raises `_MissingResolutionUpperBoundError`.
+- `created_at` is still mandatory: empty/whitespace raises `_MissingCreatedAtError` before
+  any further processing.
+- `_worker` catches both new exceptions explicitly (same pattern as `_InvertedWindowError`),
+  logs a WARNING without a traceback, and writes `status=fail` with the appropriate
+  `error_reason` string. No CLOB call is made.
+
+#### New rejection categories
+- `missing_created_at` — `created_at` field in lookup row is empty or whitespace.
+- `missing_resolution_upper_bound` — both `end_date` and `resolved_at` are empty/unparseable.
+
+#### Tests added (5 new, all green; 30/30 total)
+
+- `test_derive_window_empty_end_date_uses_resolved_at`
+- `test_derive_window_empty_resolved_at_uses_end_date`
+- `test_derive_window_both_upper_bounds_empty_rejected` — raises `_MissingResolutionUpperBoundError`
+- `test_derive_window_empty_created_at_rejected` — raises `_MissingCreatedAtError`
+- `test_derive_window_whitespace_treated_as_empty` — `end_date="   "` treated as missing
+
+#### Re-run plan
+
+1. In the manifest, identify affected markets:
+   `m.filter(pl.col("error_reason") == "Invalid isoformat string: ''")`
+2. Reset them: set `attempt_count=0` and `error_reason="legacy_isoformat_error"` to preserve
+   audit trail, then `--resume` picks them up for retry.
+3. Run `python -m pmbot.phase1_data.bars_ingest --resume`. Most of the 35 should land
+   `status=ok`; a small subset may legitimately get `missing_resolution_upper_bound` if
+   both fields are genuinely absent.
+
+#### Cross-phase lesson (fourth instance — pre-flight data profiling)
+
+This is the third edge-case class discovered in Pass 2 (after 14-day window cap and
+inverted windows). The pattern: Plan Mode designs against the happy path; scale execution
+surfaces upstream data anomalies. For Phase 1.6 onward, add a pre-flight pass before any
+heavy-lift execution: compute empty-rate, null-rate, and unique-value-count for every field
+the code will consume. Five minutes of pre-flight saves hours of "run → fail → patch → rerun".

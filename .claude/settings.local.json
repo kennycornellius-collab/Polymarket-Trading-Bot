@@ -36,7 +36,10 @@
       "Bash(pytest --collect-only -q)",
       "Bash(sed 's/::test_[^:]*$//')",
       "Bash(pip index *)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(mypy --strict src/pmbot/phase1_data)",
+      "Bash(pytest *)",
+      "Bash(mypy --strict src/pmbot/phase1_data/bars_ingest.py)"
     ]
   }
 }

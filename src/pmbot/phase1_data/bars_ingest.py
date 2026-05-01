@@ -84,6 +84,9 @@ class IngestConfig:
     gamma_base_url: str = "https://gamma-api.polymarket.com"
     clob_base_url: str = "https://clob.polymarket.com"
     lookup_inter_request_delay_s: float = 0.15
+    # Empirical bisection 2026-05-01: CLOB /prices-history rejects windows > 14 days
+    # (1,209,600 s) with HTTP 400 "interval too long". Affects 3.5% of training set.
+    clob_max_window_seconds: int = 14 * 86400
 
 
 # ── Lookup build ──────────────────────────────────────────────────────────────
@@ -287,6 +290,32 @@ def ensure_lookup(
 # ── Window derivation ─────────────────────────────────────────────────────────
 
 
+class _InvertedWindowError(Exception):
+    """Raised by derive_window when end_ts <= start_ts (bad upstream metadata)."""
+
+
+class _MissingCreatedAtError(Exception):
+    """Raised by derive_window when created_at is empty or whitespace."""
+
+
+class _MissingResolutionUpperBoundError(Exception):
+    """Raised by derive_window when both end_date and resolved_at are empty/unparseable."""
+
+
+def _parse_optional_ts(raw: str) -> datetime | None:
+    """Return parsed datetime or None if the string is empty, whitespace, or unparseable."""
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def derive_window(
     created_at: str,
     end_date: str,
@@ -296,28 +325,60 @@ def derive_window(
     """Derive (start_ts, end_ts) from market metadata.
 
     start_ts = createdAt unix seconds.
-    end_ts   = min(end_date, resolved_at) unix seconds + upper_padding_seconds.
+    end_ts   = min(populated upper bounds) unix seconds + upper_padding_seconds.
+
+    Raises:
+        _MissingCreatedAtError: if created_at is empty or whitespace.
+        _MissingResolutionUpperBoundError: if both end_date and resolved_at are empty/unparseable.
+        _InvertedWindowError: if end_ts <= start_ts.
     Pure function — no I/O.
     """
+    if not created_at.strip():
+        raise _MissingCreatedAtError("missing_created_at")
     start_ts = int(datetime.fromisoformat(created_at).timestamp())
-    end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-    if end_dt.tzinfo is None:
-        end_dt = end_dt.replace(tzinfo=timezone.utc)
-    resolved_dt = datetime.fromisoformat(resolved_at.replace("Z", "+00:00"))
-    if resolved_dt.tzinfo is None:
-        resolved_dt = resolved_dt.replace(tzinfo=timezone.utc)
-    upper = min(end_dt, resolved_dt)
+
+    end_dt = _parse_optional_ts(end_date)
+    resolved_dt = _parse_optional_ts(resolved_at)
+
+    if end_dt is not None and resolved_dt is not None:
+        upper = min(end_dt, resolved_dt)
+    elif end_dt is not None:
+        upper = end_dt
+    elif resolved_dt is not None:
+        upper = resolved_dt
+    else:
+        raise _MissingResolutionUpperBoundError("missing_resolution_upper_bound")
+
     end_ts = int(upper.timestamp()) + config.upper_padding_seconds
+    if end_ts <= start_ts:
+        raise _InvertedWindowError("inverted_window")
     return start_ts, end_ts
 
 
 # ── CLOB bar fetch ────────────────────────────────────────────────────────────
 
 
-def fetch_bars(
+def _split_window(start_ts: int, end_ts: int, max_window: int) -> list[tuple[int, int]]:
+    """Split [start_ts, end_ts] into adjacent, non-overlapping chunks ≤ max_window seconds.
+
+    Chunk N ends at T, chunk N+1 starts at T+1 (second-precision; no duplicates).
+    Returns a single-element list when the window already fits within max_window.
+    """
+    if end_ts - start_ts <= max_window:
+        return [(start_ts, end_ts)]
+    chunks: list[tuple[int, int]] = []
+    t = start_ts
+    while t < end_ts:
+        chunk_end = min(t + max_window, end_ts)
+        chunks.append((t, chunk_end))
+        t = chunk_end + 1
+    return chunks
+
+
+def _fetch_bars_chunk(
     token_id: str, start_ts: int, end_ts: int, config: IngestConfig
 ) -> list[_Bar]:
-    """Fetch 1-minute bars from CLOB /prices-history with retry.
+    """Fetch one contiguous window from CLOB /prices-history with retry.
 
     Response shape: {"history": [{t, p}, ...]} — confirmed by spike 2026-04-29.
     Retry on OSError (covers URLError, TimeoutError, RemoteDisconnected,
@@ -363,6 +424,28 @@ def fetch_bars(
             )
             time.sleep(delay)
     raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def fetch_bars(
+    token_id: str, start_ts: int, end_ts: int, config: IngestConfig
+) -> list[_Bar]:
+    """Fetch 1-minute bars, splitting windows > clob_max_window_seconds into chunks.
+
+    Chunks are fetched sequentially (not parallelised) to stay within the cautious
+    rate-limit baseline. If any chunk fails after exhausted retries, raises
+    RuntimeError("chunk_fetch_failed:{i}/{n}") and discards any partial results.
+    """
+    chunks = _split_window(start_ts, end_ts, config.clob_max_window_seconds)
+    if len(chunks) == 1:
+        return _fetch_bars_chunk(token_id, start_ts, end_ts, config)
+    n = len(chunks)
+    all_bars: list[_Bar] = []
+    for i, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        try:
+            all_bars.extend(_fetch_bars_chunk(token_id, chunk_start, chunk_end, config))
+        except Exception as exc:
+            raise RuntimeError(f"chunk_fetch_failed:{i}/{n}") from exc
+    return all_bars
 
 
 # ── Hard-fail predicates ──────────────────────────────────────────────────────
@@ -577,6 +660,47 @@ def _worker(
             attempt_count=attempt_count,
         )
         logger.debug("market_id=%s done: bar_count=%d", market_id, len(bars))
+    except _InvertedWindowError:
+        logger.warning("market_id=%s: inverted window (end_ts <= start_ts), skipping", market_id)
+        _write_manifest_temp(
+            config,
+            run_id,
+            market_id,
+            status="fail",
+            bar_count=0,
+            first_ts=0,
+            last_ts=0,
+            error_reason="inverted_window",
+            attempt_count=attempt_count,
+        )
+    except _MissingCreatedAtError:
+        logger.warning("market_id=%s: created_at empty, skipping", market_id)
+        _write_manifest_temp(
+            config,
+            run_id,
+            market_id,
+            status="fail",
+            bar_count=0,
+            first_ts=0,
+            last_ts=0,
+            error_reason="missing_created_at",
+            attempt_count=attempt_count,
+        )
+    except _MissingResolutionUpperBoundError:
+        logger.warning(
+            "market_id=%s: both end_date and resolved_at empty/unparseable, skipping", market_id
+        )
+        _write_manifest_temp(
+            config,
+            run_id,
+            market_id,
+            status="fail",
+            bar_count=0,
+            first_ts=0,
+            last_ts=0,
+            error_reason="missing_resolution_upper_bound",
+            attempt_count=attempt_count,
+        )
     except Exception as exc:
         logger.exception("worker error market_id=%s: %s", market_id, exc)
         _write_manifest_temp(

@@ -51,3 +51,4 @@ logs/
 # Jupyter (if you experiment; prefer not to commit notebooks)
 .ipynb_checkpoints/
 *.ipynblogs/
+logs/

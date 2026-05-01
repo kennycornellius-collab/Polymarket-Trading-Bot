@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import json
 import statistics
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -20,10 +21,15 @@ from pmbot.phase1_data.bars_ingest import (
     IngestConfig,
     _Bar,
     _GammaMarketDetail,
+    _InvertedWindowError,
+    _MissingCreatedAtError,
+    _MissingResolutionUpperBoundError,
     _collect_manifest_frames,
     _extract_yes_token_id,
+    _split_window,
     _write_manifest_temp,
     derive_window,
+    fetch_bars,
     run_ingest,
     validate_bars,
     write_bars,
@@ -161,6 +167,67 @@ def test_window_uses_end_date_when_earlier(tmp_config: IngestConfig) -> None:
     )
     end_date_unix = 1_704_844_800  # 2024-01-10 00:00:00 UTC
     assert end_ts == end_date_unix + tmp_config.upper_padding_seconds
+
+
+def test_derive_window_empty_end_date_uses_resolved_at(tmp_config: IngestConfig) -> None:
+    """end_date="" with valid resolved_at → upper = resolved_at + padding."""
+    resolved_at = "2025-08-24T21:50:57+00:00"
+    _, end_ts = derive_window(
+        "2025-01-01T00:00:00+00:00",
+        "",
+        resolved_at,
+        tmp_config,
+    )
+    resolved_unix = int(datetime.fromisoformat(resolved_at).timestamp())
+    assert end_ts == resolved_unix + tmp_config.upper_padding_seconds
+
+
+def test_derive_window_empty_resolved_at_uses_end_date(tmp_config: IngestConfig) -> None:
+    """resolved_at="" with valid end_date → upper = end_date + padding."""
+    end_date = "2025-08-24T21:50:57+00:00"
+    _, end_ts = derive_window(
+        "2025-01-01T00:00:00+00:00",
+        end_date,
+        "",
+        tmp_config,
+    )
+    end_date_unix = int(datetime.fromisoformat(end_date).timestamp())
+    assert end_ts == end_date_unix + tmp_config.upper_padding_seconds
+
+
+def test_derive_window_both_upper_bounds_empty_rejected(tmp_config: IngestConfig) -> None:
+    """Both end_date="" and resolved_at="" → _MissingResolutionUpperBoundError; no CLOB call possible."""
+    with pytest.raises(_MissingResolutionUpperBoundError):
+        derive_window(
+            "2025-01-01T00:00:00+00:00",
+            "",
+            "",
+            tmp_config,
+        )
+
+
+def test_derive_window_empty_created_at_rejected(tmp_config: IngestConfig) -> None:
+    """created_at="" → _MissingCreatedAtError; no CLOB call possible."""
+    with pytest.raises(_MissingCreatedAtError):
+        derive_window(
+            "",
+            "2025-08-24T21:50:57+00:00",
+            "2025-08-24T21:50:57+00:00",
+            tmp_config,
+        )
+
+
+def test_derive_window_whitespace_treated_as_empty(tmp_config: IngestConfig) -> None:
+    """end_date with only whitespace → treated as missing; resolved_at used as upper bound."""
+    resolved_at = "2025-08-24T21:50:57+00:00"
+    _, end_ts = derive_window(
+        "2025-01-01T00:00:00+00:00",
+        "   ",
+        resolved_at,
+        tmp_config,
+    )
+    resolved_unix = int(datetime.fromisoformat(resolved_at).timestamp())
+    assert end_ts == resolved_unix + tmp_config.upper_padding_seconds
 
 
 # ── Manifest schema ───────────────────────────────────────────────────────────
@@ -557,3 +624,186 @@ def test_integration_real_clob(tmp_config: IngestConfig, tmp_path: Path) -> None
     assert row["bar_count"] == len(bars)
     assert row["first_ts"] == int(bars[0]["t"])
     assert row["last_ts"] == int(bars[-1]["t"])
+
+
+# ── Window splitting (_split_window) ──────────────────────────────────────────
+
+
+def test_split_window_under_cap() -> None:
+    """Window shorter than cap returns single tuple identical to input."""
+    cap = 14 * 86400
+    start, end = 1_000_000, 1_000_000 + cap - 1
+    chunks = _split_window(start, end, cap)
+    assert chunks == [(start, end)]
+
+
+def test_split_window_exact_cap() -> None:
+    """Window exactly equal to cap returns single tuple (boundary: not over)."""
+    cap = 14 * 86400
+    start, end = 1_000_000, 1_000_000 + cap
+    chunks = _split_window(start, end, cap)
+    assert chunks == [(start, end)]
+
+
+def test_split_window_over_cap() -> None:
+    """Window 3x cap yields 3 adjacent, non-overlapping chunks.
+
+    Chunk N ends at T; chunk N+1 starts at T+1.
+    Last chunk ends exactly at the requested end_ts.
+    """
+    cap = 100  # small cap for readability
+    start = 0
+    end = 3 * cap  # 300
+    chunks = _split_window(start, end, cap)
+    assert len(chunks) == 3
+    # All three chunks together must span [start, end] without gaps or overlaps
+    assert chunks[0][0] == start
+    assert chunks[-1][1] == end
+    for i in range(len(chunks) - 1):
+        _, prev_end = chunks[i]
+        next_start, _ = chunks[i + 1]
+        assert next_start == prev_end + 1, (
+            f"Gap between chunk {i} and {i+1}: {prev_end} → {next_start}"
+        )
+    # Each chunk must be ≤ cap seconds wide
+    for chunk_start, chunk_end in chunks:
+        assert chunk_end - chunk_start <= cap
+
+
+# ── Chunked fetch_bars ────────────────────────────────────────────────────────
+
+
+def test_fetch_bars_chunked(tmp_config: IngestConfig) -> None:
+    """Window > cap triggers multiple sequential CLOB requests; results are concatenated."""
+    cap = tmp_config.clob_max_window_seconds
+    start_ts = 1_000_000
+    end_ts = start_ts + cap * 2  # two chunks
+
+    chunk1_bars = _make_bars(count=5, start_t=start_ts, dt=60)
+    chunk2_bars = _make_bars(count=5, start_t=start_ts + cap + 1, dt=60)
+
+    call_urls: list[str] = []
+
+    def fake_urlopen(req: Any, **kwargs: Any) -> Any:
+        call_urls.append(str(req.full_url))
+        # Return chunk1 bars for first call, chunk2 for second
+        payload = chunk1_bars if len(call_urls) == 1 else chunk2_bars
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"history": payload}).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    with patch("pmbot.phase1_data.bars_ingest.urllib.request.urlopen", side_effect=fake_urlopen):
+        result = fetch_bars("tok_test", start_ts, end_ts, tmp_config)
+
+    assert len(call_urls) == 2, f"Expected 2 CLOB requests, got {len(call_urls)}"
+    assert result == chunk1_bars + chunk2_bars
+
+
+def test_fetch_bars_chunked_partial_failure(tmp_config: IngestConfig) -> None:
+    """Chunk 2/3 failing after retries → RuntimeError with 'chunk_fetch_failed:2/3'."""
+    cap = tmp_config.clob_max_window_seconds
+    start_ts = 1_000_000
+    end_ts = start_ts + cap * 3  # three chunks
+
+    fast_config = IngestConfig(
+        target_path_root=tmp_config.target_path_root,
+        manifest_path=tmp_config.manifest_path,
+        lookup_path=tmp_config.lookup_path,
+        retry_max=0,  # fail immediately, no retries
+    )
+
+    call_count = 0
+
+    def fake_urlopen(req: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"history": []}).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            return mock_resp
+        raise OSError("simulated network failure on chunk 2")
+
+    with patch("pmbot.phase1_data.bars_ingest.urllib.request.urlopen", side_effect=fake_urlopen):
+        with pytest.raises(RuntimeError, match=r"chunk_fetch_failed:2/3"):
+            fetch_bars("tok_test", start_ts, end_ts, fast_config)
+
+    assert call_count == 2, "Expected chunk 1 to succeed and chunk 2 to fail (chunk 3 not reached)"
+
+
+# ── Inverted window rejection ─────────────────────────────────────────────────
+
+
+def test_derive_window_inverted_rejected(tmp_config: IngestConfig) -> None:
+    """resolved_at before created_at → _InvertedWindowError raised; no CLOB call possible."""
+    with pytest.raises(_InvertedWindowError):
+        derive_window(
+            "2024-01-20T00:00:00+00:00",  # created_at: Jan 20
+            "2024-01-10T00:00:00+00:00",  # end_date: Jan 10  (before created_at)
+            "2024-01-10T00:00:00+00:00",  # resolved_at: Jan 10 (before created_at)
+            tmp_config,
+        )
+
+
+def test_run_ingest_inverted_window_logged(
+    tmp_config: IngestConfig, tmp_path: Path
+) -> None:
+    """End-to-end: market with inverted window → manifest status=fail, error_reason='inverted_window', no CLOB call."""
+    csv_path = tmp_path / "resolved_markets.csv"
+    fields = [
+        "market_id", "question", "slug", "outcome",
+        "resolved_at", "end_date", "volume_lifetime_usdc",
+        "outcome_prices_raw", "flags",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow({
+            "market_id": "999",
+            "question": "Inverted window market",
+            "slug": "inverted",
+            "outcome": "YES",
+            # resolved_at is before created_at in lookup (2024-01-01)
+            "resolved_at": "2023-12-01T00:00:00+00:00",
+            "end_date": "2023-12-15T00:00:00+00:00",
+            "volume_lifetime_usdc": "10000",
+            "outcome_prices_raw": '["1", "0"]',
+            "flags": "",
+        })
+
+    # Lookup: created_at is Jan 2024, which is after the resolved_at/end_date above
+    _write_lookup_parquet_fixture(
+        [{"market_id": "999", "yes_token_id": "tok_inverted", "created_at": "2024-01-15T00:00:00+00:00"}],
+        tmp_config.lookup_path,
+    )
+
+    clob_calls: list[str] = []
+
+    def fake_urlopen(req: Any, **kwargs: Any) -> Any:
+        clob_calls.append(str(req.full_url))
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"history": []}).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    with patch("pmbot.phase1_data.bars_ingest.ensure_lookup", return_value=[]):
+        with patch("pmbot.phase1_data.bars_ingest.urllib.request.urlopen", side_effect=fake_urlopen):
+            run_ingest(csv_path, tmp_config)
+
+    # No CLOB calls should have been made
+    assert not clob_calls, f"Expected no CLOB calls for inverted window market, got: {clob_calls}"
+
+    # Manifest must record the failure with the right reason
+    frames = _collect_manifest_frames(tmp_config)
+    assert frames
+    df = pl.concat(frames)
+    row_999 = df.filter(pl.col("market_id") == "999")
+    assert row_999.height == 1
+    row = row_999.row(0, named=True)
+    assert row["status"] == "fail"
+    assert row["error_reason"] == "inverted_window"
+    assert row["bar_count"] == 0
