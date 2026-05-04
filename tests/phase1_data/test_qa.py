@@ -56,9 +56,7 @@ def _contiguous(start_t: int, count: int, step: int = 60) -> list[int]:
     return [start_t + i * step for i in range(count)]
 
 
-def _write_bar_partition(
-    bars_root: Path, market_id: int, date_str: str, ts: list[int]
-) -> None:
+def _write_bar_partition(bars_root: Path, market_id: int, date_str: str, ts: list[int]) -> None:
     """Write a minimal Parquet partition file for test setup."""
     part_dir = bars_root / f"market_id={market_id}" / f"utc_date={date_str}"
     part_dir.mkdir(parents=True, exist_ok=True)
@@ -75,23 +73,16 @@ def _write_manifest(bars_root: Path, market_rows: list[dict[str, object]]) -> No
     bars_root.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(
         {
-            "market_id": pl.Series(
-                [str(r["market_id"]) for r in market_rows], dtype=pl.String
-            ),
-            "status": pl.Series(
-                [str(r["status"]) for r in market_rows], dtype=pl.String
-            ),
+            "market_id": pl.Series([str(r["market_id"]) for r in market_rows], dtype=pl.String),
+            "status": pl.Series([str(r["status"]) for r in market_rows], dtype=pl.String),
             "bar_count": pl.Series(
-                [int(r.get("bar_count", 0)) for r in market_rows], dtype=pl.Int64  # type: ignore[arg-type]
+                [int(r.get("bar_count", 0)) for r in market_rows],
+                dtype=pl.Int64,  # type: ignore[arg-type]
             ),
             "first_ts": pl.Series([0] * len(market_rows), dtype=pl.Int64),
             "last_ts": pl.Series([0] * len(market_rows), dtype=pl.Int64),
-            "error_reason": pl.Series(
-                [None] * len(market_rows), dtype=pl.String
-            ),
-            "run_id": pl.Series(
-                ["test_run"] * len(market_rows), dtype=pl.String
-            ),
+            "error_reason": pl.Series([None] * len(market_rows), dtype=pl.String),
+            "run_id": pl.Series(["test_run"] * len(market_rows), dtype=pl.String),
             "completed_at": pl.Series(
                 ["2026-05-01T00:00:00+00:00"] * len(market_rows), dtype=pl.String
             ),
@@ -117,8 +108,7 @@ def _write_resolutions_csv(
         end_date = r.get("end_date", "")
         volume = r.get("volume", "1000.0")
         lines.append(
-            f"{mid},{question},{slug},{outcome},{resolved_at},{end_date},{volume},"
-            '"[""0.5""]",\n'
+            f'{mid},{question},{slug},{outcome},{resolved_at},{end_date},{volume},"[""0.5""]",\n'
         )
     (resolutions_dir / "resolved_markets.csv").write_text("".join(lines))
 
@@ -140,9 +130,7 @@ def test_no_bar_files_market_is_not_clean(tmp_path: Path) -> None:
 
 def test_immutability_check_blocks_writes_inside_bars_root(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    bad_path = (
-        config.bars_root / "market_id=123" / "utc_date=2025-01-01" / "00000000.parquet"
-    )
+    bad_path = config.bars_root / "market_id=123" / "utc_date=2025-01-01" / "00000000.parquet"
     with pytest.raises(RuntimeError, match="immutable"):
         validate_immutable_target_path(bad_path, config)
 
@@ -194,7 +182,9 @@ def test_drops_nonfinite_and_nonpositive_prices(tmp_path: Path) -> None:
 
 
 def test_window_split_at_gap_threshold(tmp_path: Path) -> None:
-    config = _make_config(tmp_path, gap_threshold_seconds=300, min_bars_per_window=3, min_bars_per_market=1)
+    config = _make_config(
+        tmp_path, gap_threshold_seconds=300, min_bars_per_window=3, min_bars_per_market=1
+    )
 
     # 301s gap → two windows
     # Window 0: t=100, 160, 220
@@ -220,10 +210,7 @@ def test_window_split_at_gap_threshold(tmp_path: Path) -> None:
     ts_to_window: dict[int, int] = {}
     for wv in result_two.windows:
         if wv.usable:
-            win_ts = set(
-                t for t in all_clean_ts
-                if wv.window_start_ts <= t <= wv.window_end_ts
-            )
+            win_ts = set(t for t in all_clean_ts if wv.window_start_ts <= t <= wv.window_end_ts)
             for t_val in win_ts:
                 assert t_val not in ts_to_window, f"t={t_val} assigned to multiple windows"
                 ts_to_window[t_val] = wv.window_idx
@@ -326,7 +313,11 @@ def test_lenient_upper_bound_flag_matches_csv_join(tmp_path: Path) -> None:
         resolutions_dir,
         [
             # Market 1: end_date present → not lenient
-            {"market_id": "1", "end_date": "2025-01-01T00:00:00+00:00", "resolved_at": "2024-12-31T00:00:00+00:00"},
+            {
+                "market_id": "1",
+                "end_date": "2025-01-01T00:00:00+00:00",
+                "resolved_at": "2024-12-31T00:00:00+00:00",
+            },
             # Market 2: end_date empty, resolved_at present → lenient
             {"market_id": "2", "end_date": "", "resolved_at": "2024-12-31T00:00:00+00:00"},
             # Market 3: both empty → not lenient (no upper bound derivable)
@@ -381,9 +372,7 @@ def test_unknown_condition_raises_not_writes_silent(
 
     original_split = qa_mod._split_into_windows
 
-    def patched_split(
-        bars_df: pl.DataFrame, gap_threshold_seconds: int
-    ) -> list[pl.DataFrame]:
+    def patched_split(bars_df: pl.DataFrame, gap_threshold_seconds: int) -> list[pl.DataFrame]:
         # Return two half-frames to simulate window_count > 1
         half = bars_df.height // 2
         return [bars_df[:half], bars_df[half:]]
@@ -496,9 +485,7 @@ def test_clean_bars_excludes_rejected_window_bars(tmp_path: Path) -> None:
     run_qa(config, dry_run=False)
 
     # (a) bars_clean/ contains only the usable window's bars
-    clean_files = list(
-        (config.bars_clean_root / f"market_id={market_id}").rglob("*.parquet")
-    )
+    clean_files = list((config.bars_clean_root / f"market_id={market_id}").rglob("*.parquet"))
     assert clean_files, "bars_clean/ must have at least one partition file"
     clean_df = pl.concat([pl.read_parquet(f) for f in clean_files]).sort("t")
     assert clean_df.height == 80, (
@@ -509,18 +496,18 @@ def test_clean_bars_excludes_rejected_window_bars(tmp_path: Path) -> None:
     assert not clean_ts_set.intersection(rejected_ts), "Rejected window bars leaked into clean"
 
     # (b) _qa_windows.parquet shows both windows with correct flags
-    win_df = pl.read_parquet(config.qa_windows_path).filter(
-        pl.col("market_id") == market_id
-    ).sort("window_idx")
+    win_df = (
+        pl.read_parquet(config.qa_windows_path)
+        .filter(pl.col("market_id") == market_id)
+        .sort("window_idx")
+    )
     assert win_df.height == 2
     assert bool(win_df["usable"][0]) is True
     assert bool(win_df["usable"][1]) is False
     assert str(win_df["reason"][1]) == "window_too_short"
 
     # (c) _qa_market.parquet shows qa_status=usable and correct reason
-    mkt_df = pl.read_parquet(config.qa_market_path).filter(
-        pl.col("market_id") == market_id
-    )
+    mkt_df = pl.read_parquet(config.qa_market_path).filter(pl.col("market_id") == market_id)
     assert str(mkt_df["qa_status"][0]) == "usable"
     assert str(mkt_df["qa_reason"][0]) == "some_windows_rejected"
     # dropped_bar_count is the price-drop count only (0 here); the rejected-window

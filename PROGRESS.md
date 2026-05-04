@@ -796,8 +796,11 @@ which answer "did the API return 1-min bars at all?").
    shared helper deferred per CLAUDE.md stay-scoped rule).
 4. JSON formatter: new `_JsonFormatter` class in qa.py only; bars_ingest.py plain-text
    logging unchanged (JSON retrofit deferred).
-5. DuckDB bar loading: avoids PyArrow (not installed) by using `fetchmany(100_000)` streaming
-   instead of `.pl()`; groups rows by market_id in Python (rows arrive sorted by ORDER BY).
+5. Bar loading strategy: `run_qa` uses per-market `pl.read_parquet(sorted(market_dir.glob(...)))`
+   instead of a global DuckDB scan. A DuckDB `WHERE market_id IN (7021 ids)` clause defeats
+   hive partition pruning (sequential file scan, ~250s per query × 2 = ~500s). Per-market
+   Polars reads skip the full corpus scan entirely; measured wall-clock: ~93s for 7,021 markets
+   (file I/O + QA logic; calibrate's DuckDB full-corpus scan remains for Step 0 only).
 6. `_USABLE_REASON_VOCAB` frozenset: captures reason string literals at module load time,
    immune to monkeypatching of individual constants, enabling `test_unknown_condition` to
    validate the vocabulary guard without the raise branch being naturally reachable.
@@ -844,7 +847,7 @@ PROGRESS.md entry documented 53,088. The 524-file delta is a counting methodolog
 38-minute window with 6 distinct run_ids. No rerun occurred.
 
 **Deferred:**
-- `--resume` mode (Phase 1.6 is full-recompute idempotent; <30s rerun).
+- `--resume` mode (Phase 1.6 is full-recompute idempotent; measured ~93s full rerun).
 - Refactoring Pass 2's three `.tmp` + `os.replace` call sites into a shared atomic_write_parquet helper.
 - Retrofitting Pass 2's logger to JSON.
 - TOML config loading for QAConfig.

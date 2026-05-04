@@ -91,12 +91,8 @@ class QAConfig:
     max_rejected_window_fraction: float = 0.5
     bars_root: Path = field(default_factory=lambda: Path("data/bars"))
     bars_clean_root: Path = field(default_factory=lambda: Path("data/bars_clean"))
-    qa_market_path: Path = field(
-        default_factory=lambda: Path("data/bars/_qa_market.parquet")
-    )
-    qa_windows_path: Path = field(
-        default_factory=lambda: Path("data/bars/_qa_windows.parquet")
-    )
+    qa_market_path: Path = field(default_factory=lambda: Path("data/bars/_qa_market.parquet"))
+    qa_windows_path: Path = field(default_factory=lambda: Path("data/bars/_qa_windows.parquet"))
     qa_distributions_path: Path = field(
         default_factory=lambda: Path("data/bars/_qa_distributions.parquet")
     )
@@ -314,15 +310,11 @@ def qa_one_market(
     raw_bar_count = bars_df.height
 
     # ── Price cleaning: drop non-finite and non-positive p ────────────────────
-    price_cleaned = bars_df.filter(
-        pl.col("p").is_finite() & (pl.col("p") > 0.0)
-    )
+    price_cleaned = bars_df.filter(pl.col("p").is_finite() & (pl.col("p") > 0.0))
 
     # ── Dedup duplicate t (keep last occurrence in sort order) ────────────────
     deduped = (
-        price_cleaned.sort("t")
-        .unique(subset=["t"], keep="last", maintain_order=True)
-        .sort("t")
+        price_cleaned.sort("t").unique(subset=["t"], keep="last", maintain_order=True).sort("t")
     )
 
     clean_bar_count = deduped.height
@@ -408,11 +400,7 @@ def qa_one_market(
         )
 
     # ── qa_status: clean vs usable ────────────────────────────────────────────
-    is_clean = (
-        window_count == 1
-        and usable_window_count == 1
-        and dropped_bar_count == 0
-    )
+    is_clean = window_count == 1 and usable_window_count == 1 and dropped_bar_count == 0
     if is_clean:
         qa_status = "clean"
         mkt_reason: str | None = None
@@ -465,9 +453,7 @@ def write_clean_bars(
     )
     for date_val in df_dated["utc_date"].unique().sort().to_list():
         date_str = str(date_val)
-        partition_dir = (
-            config.bars_clean_root / f"market_id={market_id}" / f"utc_date={date_str}"
-        )
+        partition_dir = config.bars_clean_root / f"market_id={market_id}" / f"utc_date={date_str}"
         partition_dir.mkdir(parents=True, exist_ok=True)
         out_path = partition_dir / "00000000.parquet"
         validate_immutable_target_path(out_path, config)
@@ -484,15 +470,9 @@ def _write_qa_market_parquet(rows: list[_MarketRow], config: QAConfig) -> None:
             "market_id": pl.Series([r["market_id"] for r in rows], dtype=pl.Int64),
             "qa_status": pl.Series([r["qa_status"] for r in rows], dtype=pl.String),
             "qa_reason": pl.Series([r["qa_reason"] for r in rows], dtype=pl.String),
-            "clean_bar_count": pl.Series(
-                [r["clean_bar_count"] for r in rows], dtype=pl.Int64
-            ),
-            "dropped_bar_count": pl.Series(
-                [r["dropped_bar_count"] for r in rows], dtype=pl.Int64
-            ),
-            "window_count": pl.Series(
-                [r["window_count"] for r in rows], dtype=pl.Int64
-            ),
+            "clean_bar_count": pl.Series([r["clean_bar_count"] for r in rows], dtype=pl.Int64),
+            "dropped_bar_count": pl.Series([r["dropped_bar_count"] for r in rows], dtype=pl.Int64),
+            "window_count": pl.Series([r["window_count"] for r in rows], dtype=pl.Int64),
             "usable_window_count": pl.Series(
                 [r["usable_window_count"] for r in rows], dtype=pl.Int64
             ),
@@ -503,9 +483,7 @@ def _write_qa_market_parquet(rows: list[_MarketRow], config: QAConfig) -> None:
                 [r["lenient_upper_bound"] for r in rows], dtype=pl.Boolean
             ),
             "run_id": pl.Series([r["run_id"] for r in rows], dtype=pl.String),
-            "completed_at": pl.Series(
-                [r["completed_at"] for r in rows], dtype=pl.String
-            ),
+            "completed_at": pl.Series([r["completed_at"] for r in rows], dtype=pl.String),
         }
     )
     config.qa_market_path.parent.mkdir(parents=True, exist_ok=True)
@@ -520,21 +498,15 @@ def _write_qa_windows_parquet(rows: list[_WindowRow], config: QAConfig) -> None:
         {
             "market_id": pl.Series([r["market_id"] for r in rows], dtype=pl.Int64),
             "window_idx": pl.Series([r["window_idx"] for r in rows], dtype=pl.Int32),
-            "window_start_ts": pl.Series(
-                [r["window_start_ts"] for r in rows], dtype=pl.Int64
-            ),
-            "window_end_ts": pl.Series(
-                [r["window_end_ts"] for r in rows], dtype=pl.Int64
-            ),
+            "window_start_ts": pl.Series([r["window_start_ts"] for r in rows], dtype=pl.Int64),
+            "window_end_ts": pl.Series([r["window_end_ts"] for r in rows], dtype=pl.Int64),
             "bar_count": pl.Series([r["bar_count"] for r in rows], dtype=pl.Int64),
             "median_dt": pl.Series([r["median_dt"] for r in rows], dtype=pl.Float64),
             "max_dt": pl.Series([r["max_dt"] for r in rows], dtype=pl.Float64),
             "usable": pl.Series([r["usable"] for r in rows], dtype=pl.Boolean),
             "reason": pl.Series([r["reason"] for r in rows], dtype=pl.String),
             "run_id": pl.Series([r["run_id"] for r in rows], dtype=pl.String),
-            "completed_at": pl.Series(
-                [r["completed_at"] for r in rows], dtype=pl.String
-            ),
+            "completed_at": pl.Series([r["completed_at"] for r in rows], dtype=pl.String),
         }
     )
     config.qa_windows_path.parent.mkdir(parents=True, exist_ok=True)
@@ -557,9 +529,7 @@ def compute_distributions(config: QAConfig) -> pl.DataFrame:
     con = duckdb.connect()
     con.execute("PRAGMA disable_progress_bar;")
 
-    glob_pattern = (
-        config.bars_root.as_posix() + "/market_id=*/utc_date=*/*.parquet"
-    )
+    glob_pattern = config.bars_root.as_posix() + "/market_id=*/utc_date=*/*.parquet"
     manifest_path = (config.bars_root / "_manifest.parquet").as_posix()
 
     con.execute(
@@ -631,9 +601,7 @@ def compute_distributions(config: QAConfig) -> pl.DataFrame:
         FROM pm GROUP BY 1
         """
     ).fetchall():
-        rows.append(
-            {"metric": "max_gap_histogram", "bucket": bucket, "value": float(n)}
-        )
+        rows.append({"metric": "max_gap_histogram", "bucket": bucket, "value": float(n)})
 
     # Histogram 3: per-market bar-count percentiles
     bar_pct_row = con.execute(
@@ -643,13 +611,9 @@ def compute_distributions(config: QAConfig) -> pl.DataFrame:
         """
     ).fetchone()
     if bar_pct_row is not None:
-        pct_labels = [
-            "p0", "p1", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "p99", "p100"
-        ]
+        pct_labels = ["p0", "p1", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "p99", "p100"]
         for label, val in zip(pct_labels, bar_pct_row[0]):
-            rows.append(
-                {"metric": "bar_count_percentile", "bucket": label, "value": float(val)}
-            )
+            rows.append({"metric": "bar_count_percentile", "bucket": label, "value": float(val)})
 
     # Histogram 4: window-count at candidate N values (key calibration table)
     for n_val in (120, 300, 600, 1800):
@@ -682,12 +646,8 @@ def compute_distributions(config: QAConfig) -> pl.DataFrame:
         """
     ).fetchone()
     if gap_pct_row is not None:
-        for label, val in zip(
-            ["p50", "p75", "p90", "p95", "p99", "p100"], gap_pct_row[0]
-        ):
-            rows.append(
-                {"metric": "gap_rate_percentile", "bucket": label, "value": float(val)}
-            )
+        for label, val in zip(["p50", "p75", "p90", "p95", "p99", "p100"], gap_pct_row[0]):
+            rows.append({"metric": "gap_rate_percentile", "bucket": label, "value": float(val)})
 
     dist_df = pl.DataFrame(
         {
@@ -726,8 +686,13 @@ def run_qa(
 ) -> RunSummary:
     """Full QA recompute over all status=ok markets.
 
-    Loads all bar data via DuckDB, processes each market via qa_one_market,
-    writes clean bars (if not dry_run), then atomically writes both ledger
+    Reads bars per-market from bars_root/market_id={id}/utc_date=*/*.parquet
+    using Polars (one targeted read per market, ~8 files). This avoids a
+    global DuckDB corpus scan which is slow on Windows due to sequential
+    partition-predicate evaluation of the WHERE IN clause. DuckDB is kept
+    for compute_distributions (cross-partition aggregation) where it excels.
+
+    Writes clean bars (if not dry_run), then atomically writes both ledger
     parquets. run_id and completed_at are consistent across both ledgers.
 
     Note: bars_clean/ is NOT purged before writing. Rejected markets from
@@ -758,72 +723,64 @@ def run_qa(
         },
     )
 
-    # Load all bars via DuckDB (streaming — no PyArrow dependency)
-    con = duckdb.connect()
-    con.execute("PRAGMA disable_progress_bar;")
-
-    glob_pattern = (
-        config.bars_root.as_posix() + "/market_id=*/utc_date=*/*.parquet"
-    )
-    id_list = ",".join(str(x) for x in sorted(ok_id_set))
-
-    # DISTINCT query is small (≤7,021 rows) — safe to fetchall
-    markets_with_bars_rows = con.execute(
-        f"""
-        SELECT DISTINCT CAST(market_id AS BIGINT) AS market_id
-        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-        WHERE CAST(market_id AS BIGINT) IN ({id_list})
-        """
-    ).fetchall()
-    markets_with_bars: set[int] = {int(r[0]) for r in markets_with_bars_rows}
-    markets_no_bars = ok_id_set - markets_with_bars
-
+    t0 = datetime.now(timezone.utc).timestamp()
     market_rows: list[_MarketRow] = []
     window_rows: list[_WindowRow] = []
     counts = {"clean": 0, "usable": 0, "rejected": 0}
 
-    # Markets with no bar files → immediate reject
-    for mid in sorted(markets_no_bars):
+    for i, mid in enumerate(sorted(ok_id_set), start=1):
+        if i % 100 == 1:
+            logger.info(
+                "market_progress",
+                extra={
+                    "extra_fields": {
+                        "i": i,
+                        "market_id": mid,
+                        "elapsed_s": round(datetime.now(timezone.utc).timestamp() - t0, 2),
+                    }
+                },
+            )
+
+        market_dir = config.bars_root / f"market_id={mid}"
+        parquet_files = sorted(market_dir.glob("utc_date=*/*.parquet"))
+
+        if not parquet_files:
+            market_rows.append(
+                _MarketRow(
+                    market_id=mid,
+                    qa_status="rejected",
+                    qa_reason=_REASON_NO_BAR_FILES,
+                    clean_bar_count=0,
+                    dropped_bar_count=0,
+                    window_count=0,
+                    usable_window_count=0,
+                    total_usable_bar_count=0,
+                    lenient_upper_bound=mid in lenient_ids,
+                    run_id=run_id,
+                    completed_at=completed_at,
+                )
+            )
+            counts["rejected"] += 1
+            logger.info(
+                "market_qa",
+                extra={
+                    "extra_fields": {
+                        "market_id": mid,
+                        "qa_status": "rejected",
+                        "qa_reason": _REASON_NO_BAR_FILES,
+                        "run_id": run_id,
+                    }
+                },
+            )
+            continue
+
+        bars_df = pl.read_parquet(parquet_files)
+        result = qa_one_market(mid, bars_df, config)
+        lenient = mid in lenient_ids
+
         market_rows.append(
             _MarketRow(
                 market_id=mid,
-                qa_status="rejected",
-                qa_reason=_REASON_NO_BAR_FILES,
-                clean_bar_count=0,
-                dropped_bar_count=0,
-                window_count=0,
-                usable_window_count=0,
-                total_usable_bar_count=0,
-                lenient_upper_bound=mid in lenient_ids,
-                run_id=run_id,
-                completed_at=completed_at,
-            )
-        )
-        counts["rejected"] += 1
-        logger.info(
-            "market_qa",
-            extra={
-                "extra_fields": {
-                    "market_id": mid,
-                    "qa_status": "rejected",
-                    "qa_reason": _REASON_NO_BAR_FILES,
-                    "run_id": run_id,
-                }
-            },
-        )
-
-    def _flush_market(fmid: int, ts: list[int], ps: list[float]) -> None:
-        bars_df = pl.DataFrame(
-            {
-                "t": pl.Series(ts, dtype=pl.Int64),
-                "p": pl.Series(ps, dtype=pl.Float64),
-            }
-        )
-        result = qa_one_market(fmid, bars_df, config)
-        lenient = fmid in lenient_ids
-        market_rows.append(
-            _MarketRow(
-                market_id=fmid,
                 qa_status=result.qa_status,
                 qa_reason=result.qa_reason,
                 clean_bar_count=result.clean_bar_count,
@@ -839,7 +796,7 @@ def run_qa(
         for wres in result.windows:
             window_rows.append(
                 _WindowRow(
-                    market_id=fmid,
+                    market_id=mid,
                     window_idx=wres.window_idx,
                     window_start_ts=wres.window_start_ts,
                     window_end_ts=wres.window_end_ts,
@@ -857,7 +814,7 @@ def run_qa(
             "market_qa",
             extra={
                 "extra_fields": {
-                    "market_id": fmid,
+                    "market_id": mid,
                     "qa_status": result.qa_status,
                     "qa_reason": result.qa_reason,
                     "clean_bar_count": result.clean_bar_count,
@@ -871,39 +828,7 @@ def run_qa(
             },
         )
         if not dry_run and result.qa_status != "rejected":
-            write_clean_bars(fmid, result.clean_df, config)
-
-    # Stream bars sorted by (market_id, t); group client-side to avoid PyArrow
-    cur = con.execute(
-        f"""
-        SELECT CAST(market_id AS BIGINT) AS market_id,
-               CAST(t AS BIGINT) AS t,
-               CAST(p AS DOUBLE) AS p
-        FROM read_parquet('{glob_pattern}', hive_partitioning=true)
-        WHERE CAST(market_id AS BIGINT) IN ({id_list})
-        ORDER BY market_id, t
-        """
-    )
-    current_mid: int | None = None
-    current_ts: list[int] = []
-    current_ps: list[float] = []
-    while True:
-        batch = cur.fetchmany(100_000)
-        if not batch:
-            break
-        for row in batch:
-            row_mid, row_t, row_p = int(row[0]), int(row[1]), float(row[2])
-            if row_mid != current_mid:
-                if current_mid is not None:
-                    _flush_market(current_mid, current_ts, current_ps)
-                current_mid = row_mid
-                current_ts = [row_t]
-                current_ps = [row_p]
-            else:
-                current_ts.append(row_t)
-                current_ps.append(row_p)
-    if current_mid is not None:
-        _flush_market(current_mid, current_ts, current_ps)
+            write_clean_bars(mid, result.clean_df, config)
 
     if not dry_run:
         _write_qa_market_parquet(market_rows, config)
