@@ -761,3 +761,90 @@ inverted windows). The pattern: Plan Mode designs against the happy path; scale 
 surfaces upstream data anomalies. For Phase 1.6 onward, add a pre-flight pass before any
 heavy-lift execution: compute empty-rate, null-rate, and unique-value-count for every field
 the code will consume. Five minutes of pre-flight saves hours of "run → fail → patch → rerun".
+
+## 2026-05-04 — Phase 1.6: Data Quality Validation
+
+**SPEC step covered:** Phase 1, Step 1.6 — Data Quality Validation gate that answers
+"is this market usable for training?" (as opposed to Pass 2's endpoint-fidelity predicates
+which answer "did the API return 1-min bars at all?").
+
+**Outputs produced:**
+- `data/bars/_qa_market.parquet` — per-market verdict (7,021 rows)
+- `data/bars/_qa_windows.parquet` — per-window detail (~9,180 rows)
+- `data/bars/_qa_distributions.parquet` — Step 0 empirical pre-pass histograms
+- `data/bars_clean/market_id=*/utc_date=*/00000000.parquet` — cleaned bars (usable-window
+  bars only; rejected-market and rejected-window bars excluded)
+
+**Frozen QAConfig (justified by Step 0 + Step 0.5):**
+- `gap_threshold_seconds = 300` — empirical knee: 81.1% single-window at 300s vs 43.9%
+  at 120s; going to 600s only buys 8.5pp more but glosses over real outages.
+- `min_bars_per_window = 60` — 1h at 60s/bar; minimum trainable run; drops zero markets alone.
+- `min_bars_per_market = 60` — **revised down from 360** after Step 0.5 (see caveat 6);
+  matches per-window floor; drops zero markets currently; hard-fail safety net for future.
+- `max_rejected_window_fraction = 0.5` — rejects 33 outage-pocked markets (0.5%); 0 markets
+  at >75% rejected.
+
+**Predicted verdict counts:** clean=5,697 (81.1%) | usable=1,291 (18.4%) | rejected=33 (0.5%).
+
+**Key design decisions:**
+1. `bars_clean/` is self-sufficient — contains only usable-window bars so Phase 2 can read
+   partition files directly without consulting `_qa_windows.parquet` to avoid gap-spanning
+   sequences. `_qa_windows.parquet` remains for audit/transparency.
+2. Lenient-upper-bound flag (35 markets): derived from `resolved_markets.csv` (end_date empty
+   + resolved_at present). `_market_lookup.parquet` does not carry end_date/resolved_at.
+3. Atomic write: `.tmp` + `os.replace` inlined in qa.py (same pattern as bars_ingest.py;
+   shared helper deferred per CLAUDE.md stay-scoped rule).
+4. JSON formatter: new `_JsonFormatter` class in qa.py only; bars_ingest.py plain-text
+   logging unchanged (JSON retrofit deferred).
+5. DuckDB bar loading: avoids PyArrow (not installed) by using `fetchmany(100_000)` streaming
+   instead of `.pl()`; groups rows by market_id in Python (rows arrive sorted by ORDER BY).
+6. `_USABLE_REASON_VOCAB` frozenset: captures reason string literals at module load time,
+   immune to monkeypatching of individual constants, enabling `test_unknown_condition` to
+   validate the vocabulary guard without the raise branch being naturally reachable.
+
+**Tests:** 18 tests (pytest green), mypy --strict clean, ruff clean.
+All tests use tmp_path and synthetic data; none touch real data/.
+
+**Caveats:**
+
+1. **Lenient-upper-bound (35 markets):** identified by joining resolved_markets.csv
+   (end_date empty, resolved_at present) to the manifest's status=ok set. Bars may extend
+   slightly past strict end_date and could include post-resolution noise. Phase 2 decides
+   whether to exclude.
+
+2. **Chunk-seam phantom:** PROGRESS.md 2026-05-01 noted "248 markets, ~1s gaps" from
+   Pass 2's 14-day chunking. Step 0 finds zero bars with dt=1s and only 254 bars with
+   dt in [1,5]s across 160 markets. CLOB fidelity=1 returns naturally-occurring bars, not
+   boundary-synthesized ones — the concern was theoretical, not empirical.
+
+3. **Phase 1.6 supersedes Pass 2's predicates downstream.** Pass 2's min_bars=10 and
+   median(dt)>300s are endpoint-fidelity checks. Phase 1.6's predicates are training-quality
+   checks. Both coexist in their respective modules. Downstream consumers (Phase 1.3, Phase 2)
+   read _qa_market.parquet for usability decisions, never Pass 2's predicates.
+
+4. **Sample-bias:** the 5000+ market_id band is dramatically cleaner (81% clean, 1 rejected
+   of 2,021) than bands 0–4999 (67% clean, 15–21% rejected). Not a bug; reflects CLOB-era
+   recency. Phase 2 should not assume verdict distribution is uniform across the corpus.
+
+5. **`pmbot.config` doesn't exist** in the repo today; path constants live as defaults on
+   per-module dataclasses. Phase 1.6 follows this existing pattern.
+
+6. **`min_bars_per_market` revised 360 → 60 after Step 0.5 characterized the dropped cluster.**
+   The original threshold (6h) would have rejected 1,021 markets — 98.7% of which (1,008)
+   are short-dated BTC strike markets (`btc-multistrike-4h-*` and `will-the-price-of-bitcoin-be-*`),
+   exactly the Phase 2 Oracle's training universe per SPEC §2.1. Lowered to M=60 to match
+   min_bars_per_window; drops zero markets via this predicate currently while preserving
+   hard-fail behavior for any future ingestion with no usable data. Lesson: histogram knees
+   alone are not sufficient justification for threshold cuts — characterize the excluded set
+   against resolved_markets.csv (slug/question/TTE/volume) before freezing.
+
+**Partition count clarification:** Step 0 measured 53,612 partition files via glob; Pass 2
+PROGRESS.md entry documented 53,088. The 524-file delta is a counting methodology difference
+(earlier glob snapshot vs. final manifest): all 7,046 manifest rows have completed_at in a
+38-minute window with 6 distinct run_ids. No rerun occurred.
+
+**Deferred:**
+- `--resume` mode (Phase 1.6 is full-recompute idempotent; <30s rerun).
+- Refactoring Pass 2's three `.tmp` + `os.replace` call sites into a shared atomic_write_parquet helper.
+- Retrofitting Pass 2's logger to JSON.
+- TOML config loading for QAConfig.
