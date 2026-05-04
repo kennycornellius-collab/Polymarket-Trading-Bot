@@ -39,7 +39,21 @@
       "Bash(pip install *)",
       "Bash(mypy --strict src/pmbot/phase1_data)",
       "Bash(pytest *)",
-      "Bash(mypy --strict src/pmbot/phase1_data/bars_ingest.py)"
+      "Bash(mypy --strict src/pmbot/phase1_data/bars_ingest.py)",
+      "Bash(where python *)",
+      "Bash(where python3 *)",
+      "Bash(where py *)",
+      "Bash(where uv *)",
+      "Bash(where duckdb *)",
+      "Bash(C:/polymarket/.venv/Scripts/python.exe -c \"import polars; print\\('polars', polars.__version__\\)\")",
+      "Bash(C:/polymarket/.venv/Scripts/python.exe -c \"import duckdb; print\\('duckdb', duckdb.__version__\\)\")",
+      "Bash(C:/polymarket/.venv/Scripts/python.exe *)",
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(PYTHONIOENCODING=utf-8 python *)",
+      "Bash(Get-Content \"C:\\\\Users\\\\kenny\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--polymarket\\\\28e05832-201d-4fa0-873a-ba7e001b97b8\\\\tasks\\\\bupqj0e3x.output\" -Wait)",
+      "PowerShell(Measure-Command *)",
+      "PowerShell(cd C:\\\\polymarket; $env:PYTHONUTF8=1; python -c \"import polars as pl; df=pl.read_parquet\\('data/bars/_qa_market.parquet'\\); print\\(df.group_by\\('qa_status'\\).agg\\(pl.len\\(\\)\\).sort\\('qa_status'\\)\\)\")",
+      "PowerShell(cd C:\\\\polymarket; $env:PYTHONUTF8=1; python -c \"import polars as pl; print\\('lenient_count:', pl.read_parquet\\('data/bars/_qa_market.parquet'\\).filter\\(pl.col\\('lenient_upper_bound'\\)\\).height\\)\")"
     ]
   }
 }
